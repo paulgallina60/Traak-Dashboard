@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Traak — Executive Dashboard</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" />
+<style>
+  html, body { margin: 0; padding: 0; background: #111417; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+<script>
+(function () {
+"use strict";
+var h = React.createElement;
+var useState = React.useState, useEffect = React.useEffect, useCallback = React.useCallback;
+
+var COLORS = {
+  bg: "#111417", panel: "#1A1E22", panelBorder: "#262B30",
+  accent: "#FF4B26", lane: "#4A9FE8", text: "#F3F4F2",
+  textMuted: "#8B9196", textFaint: "#54595E",
+  green: "#34D399", orange: "#FBBF24", red: "#F87171",
+};
+
+var KNOWN_SHEETS = {
+  trafficConversion: "1RibBP4aU7ZCyb6NenGazAa92bpQkYdxoTnPmx7_NIPU",
+  dailyTracker: "1TEJwWHvWQPJoo9zor7Zz-IAVegXIYX75hSWXCPMc57o",
+  stockForecast: "1jrC_3zrEs4KJTrC-Mn37NHAA62zWM1oNG_awEZapXLg",
+};
+
+function gvizUrl(sheetId, tabName) {
+  var base = "https://docs.google.com/spreadsheets/d/" + sheetId + "/gviz/tq?tqx=out:csv&headers=0&t=" + Date.now();
+  return tabName ? base + "&sheet=" + encodeURIComponent(tabName) : base;
+}
+
+var SOURCE_SPECS = {
+  dailyTracker: { sheetId: KNOWN_SHEETS.dailyTracker, tabName: "Daily Tracker", label: "Daily Tracker" },
+  stockForecast: { sheetId: KNOWN_SHEETS.stockForecast, tabName: "", label: "Stock Forecast" },
+  conversionFunnel: { sheetId: KNOWN_SHEETS.trafficConversion, tabName: "Conversion Funnel", label: "Conversion Funnel" },
+  metaAds: { sheetId: KNOWN_SHEETS.trafficConversion, tabName: "Meta Ads", label: "Meta Ads" },
+  googleAds: { sheetId: KNOWN_SHEETS.trafficConversion, tabName: "Google Ads", label: "Google Ads" },
+  klaviyo: { sheetId: KNOWN_SHEETS.trafficConversion, tabName: "Klaviyo", label: "Klaviyo" },
+  monthlyRecommendations: { sheetId: KNOWN_SHEETS.dailyTracker, tabName: "Monthly AI Recommendations", label: "Monthly AI Recommendations" },
+  weeklyAdRecommendations: { sheetId: KNOWN_SHEETS.dailyTracker, tabName: "Weekly Ad Recommendations", label: "Weekly Ad Recommendations" },
+};
+
+function fetchGvizAsRows(sheetId, tabName) {
+  var url = gvizUrl(sheetId, tabName);
+  return fetch(url).then(function (res) {
+      if (!res.ok) throw new Error("HTTP Error " + res.status);
+      return res.text();
+    }).then(function (csvText) {
+      return new Promise(function (resolve, reject) {
+        Papa.parse(csvText, { skipEmptyLines: true, complete: function (results) { resolve(results.data); }, error: function (err) { reject(err); } });
+      });
+    });
+}
+
+function fetchGvizAsJsonRows(sheetId, tabName) {
+  // Used specifically for text-heavy tabs (AI recommendations) -- CSV
+  // export was returning an empty response (200 OK, Content-Length: 0) for
+  // cells containing long multi-paragraph text. JSON handles long text
+  // correctly, but headers=0 caused gviz to mis-detect the column count on
+  // this small, newly-created tab (returned 1 column, 0 rows). Using
+  // headers=1 forces explicit recognition of the real header row, and we
+  // rebuild a combined [header, ...dataRows] array afterward so downstream
+  // code sees the same shape it always has.
+  var url = "https://docs.google.com/spreadsheets/d/" + sheetId + "/gviz/tq?tqx=out:json&headers=1&t=" + Date.now();
+  if (tabName) url += "&sheet=" + encodeURIComponent(tabName);
+  return fetch(url).then(function (res) {
+      if (!res.ok) throw new Error("HTTP Error " + res.status);
+      return res.text();
+    }).then(function (text) {
+      var jsonStart = text.indexOf('{');
+      var jsonEnd = text.lastIndexOf('}');
+      if (jsonStart === -1 || jsonEnd === -1) throw new Error("Unexpected response format");
+      var data = JSON.parse(text.substring(jsonStart, jsonEnd + 1));
+      if (!data.table) return [];
+      var headerRow = (data.table.cols || []).map(function (col) { return col.label || ""; });
+      var dataRows = (data.table.rows || []).map(function (row) {
+        return data.table.cols.map(function (col, i) {
+          var cell = row.c ? row.c[i] : null;
+          if (!cell || cell.v === null || cell.v === undefined) return "";
+          return String(cell.v);
+        });
+      });
+      return [headerRow].concat(dataRows);
+    });
+}
+
+function extractDate(str) {
+  var m = String(str).match(/(\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4})/);
+  if (!m) return null;
+  var d = m[1];
+  if (d.indexOf('/') !== -1) {
+    var p = d.split('/');
+    return p[2] + '-' + p[1].padStart(2, '0') + '-' + p[0].padStart(2, '0');
+  }
+  return d;
+}
+
+function toNumber(v) {
+  if (v === undefined || v === null || v === "") return 0;
+  var n = parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+  return isNaN(n) ? 0 : n;
+}
+
+function getPreviousWeekMonday() {
+  var d = new Date();
+  var day = d.getDay();
+  var diff = (day === 0 ? -6 : 1) - day; 
+  d.setDate(d.getDate() + diff - 7); 
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function parseDailyTracker(rows) {
+  if (!rows) return null;
+  var dailyData = {}, availableDates = [];
+  for (var i = 2; i < rows.length; i++) {
+     var r = rows[i];
+     var d = extractDate(r[0]);
+     if(!d) continue; 
+     var sales = toNumber(r[1]), orders = toNumber(r[3]), profit = toNumber(r[19]);
+     dailyData[d] = {
+       sales: sales, orders: orders, profit: profit,
+       sessions: toNumber(r[5]), meta: toNumber(r[10]), google: toNumber(r[11]),
+       aov: orders ? sales / orders : 0, profitPct: sales ? (profit / sales) * 100 : 0
+     };
+     if (availableDates.indexOf(d) === -1) availableDates.push(d);
+  }
+  return { byDate: dailyData, dates: availableDates };
+}
+
+function parseConversionFunnel(rows) {
+  if (!rows) return null;
+  var weeks = {};
+  for (var i = 1; i < rows.length; i++) {
+      var r = rows[i];
+      var d = extractDate(r[0]);
+      if (!d) continue;
+      weeks[d] = {
+        sessions: toNumber(r[1]), 
+        sessionsToPdp: toNumber(r[2]), 
+        pdpToAtc: toNumber(r[4]), 
+        atcToCheckout: toNumber(r[6]), 
+        checkoutToTransaction: toNumber(r[8])
+      };
+  }
+  return weeks;
+}
+
+function parseAdsPlatform(rows, platform) {
+  if (!rows) return null;
+  var weeks = {}, currentWeek = null;
+  var cSpend = 0, cClicks = 0, cImpr = 0, cConv = 0, cConvVal = 0;
+
+  var isMeta = platform === "meta";
+  var groupIdx = 1;
+  var imprIdx = isMeta ? 4 : 3;
+  var clickIdx = isMeta ? 12 : 4;
+  var convIdx = isMeta ? 6 : 9;
+  var spendIdx = isMeta ? 7 : 6;
+  var valIdx = isMeta ? 9 : 11;
+
+  function saveWeek() {
+    if (currentWeek) weeks[currentWeek] = {
+      spend: cSpend, clicks: cClicks, impressions: cImpr, conversions: cConv, convValue: cConvVal,
+      ctr: cImpr ? (cClicks / cImpr) * 100 : 0, cpa: cConv ? cSpend / cConv : null, roas: cSpend ? cConvVal / cSpend : null
+    };
+  }
+
+  for (var i = 1; i < rows.length; i++) {
+      var r = rows[i];
+      var c0 = String(r[0] || "").trim();
+      var d = extractDate(c0);
+      
+      if (d && (c0.toLowerCase().indexOf("week") !== -1 || c0 === d)) {
+          saveWeek();
+          currentWeek = d;
+          cSpend = 0; cClicks = 0; cImpr = 0; cConv = 0; cConvVal = 0;
+      } else if (currentWeek && r[0]) {
+          var groupVal = String(r[groupIdx] || "").trim().toUpperCase();
+          if (groupVal === "TOTAL") {
+              cSpend += toNumber(r[spendIdx]); 
+              cClicks += toNumber(r[clickIdx]); 
+              cImpr += toNumber(r[imprIdx]);
+              cConv += toNumber(r[convIdx]); 
+              cConvVal += toNumber(r[valIdx]);
+          }
+      }
+  }
+  saveWeek();
+  return weeks;
+}
+
+function parseKlaviyo(rows) {
+  if (!rows) return null;
+  var weeks = {}, currentWeek = null, cCamp = null, cFlows = null, section = null;
+
+  for (var i = 1; i < rows.length; i++) {
+    var r = rows[i];
+    var cellA = String(r[0] || "").trim();
+    var d = extractDate(cellA);
+    
+    if (d && (cellA.toLowerCase().indexOf("week") !== -1 || cellA === d)) {
+        if (currentWeek) weeks[currentWeek] = { campaigns: cCamp, flows: cFlows };
+        currentWeek = d; cCamp = null; cFlows = null; section = null;
+    } else if (currentWeek) {
+        if (cellA === "Campaigns" || cellA === "Flows") { section = cellA; }
+        else if (cellA.toUpperCase() === "TOTAL" && section) {
+            var stats = { openRate: toNumber(r[4]), clickRate: toNumber(r[6]), revenue: toNumber(r[10]) };
+            if (section === "Campaigns") cCamp = stats;
+            if (section === "Flows") cFlows = stats;
+        }
+    }
+  }
+  if (currentWeek) weeks[currentWeek] = { campaigns: cCamp, flows: cFlows };
+  return weeks;
+}
+
+function parseStockForecast(rows) {
+  if (!rows) return null;
+  var urgent = [];
+  for (var i = 2; i < rows.length; i++) {
+      var r = rows[i];
+      var status = String(r[12] || "").trim().toUpperCase();
+      if (status === "REORDER NOW") {
+          var name = String(r[1] || "").trim();
+          var size = String(r[2] || "").trim();
+          var fullName = size && size.toLowerCase() !== "default title" ? name + " - " + size : name;
+          urgent.push({ name: fullName, qty: r[3] || "0" });
+      }
+  }
+  return { urgentCount: urgent.length, urgent: urgent.slice(0, 5) };
+}
+
+function parseRecommendationsTab(rows) {
+  // Simple text table: row 0 = header ["Week"/"Month", "Recommendations"], every row after is one period's text.
+  if (!rows || rows.length < 2) return null;
+  var last = rows[rows.length - 1];
+  return { period: last[0], text: last[1] };
+}
+
+function getCurrentMonthPrefix() {
+  var d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+function aggregateMonthlyWeeks(weeksObj, monthPrefix, sumFields, rateFields) {
+  // weeksObj: { "2026-08-17": {spend, clicks, ...}, ... } -- sums sumFields
+  // across every week whose key starts with monthPrefix, then recomputes
+  // rateFields from a provided formula (never averages rates directly).
+  if (!weeksObj) return null;
+  var totals = {};
+  sumFields.forEach(function (f) { totals[f] = 0; });
+  var matchedAny = false;
+  Object.keys(weeksObj).forEach(function (weekKey) {
+    if (weekKey.indexOf(monthPrefix) !== 0) return;
+    var week = weeksObj[weekKey];
+    if (!week) return;
+    matchedAny = true;
+    sumFields.forEach(function (f) { totals[f] += (week[f] || 0); });
+  });
+  return matchedAny ? totals : null;
+}
+
+function aggregateMonthlyFunnel(weeksObj, monthPrefix) {
+  var totals = aggregateMonthlyWeeks(weeksObj, monthPrefix, ["sessions"], []);
+  if (!totals) return null;
+  // Conversion Funnel's weekly rows only store %s, not raw PDP/ATC/Checkout
+  // counts, so an exact recompute isn't possible client-side -- average the
+  // %s across matched weeks instead, flagged as an approximation.
+  var pctFields = ["sessionsToPdp", "pdpToAtc", "atcToCheckout", "checkoutToTransaction"];
+  var sums = {}, count = 0;
+  pctFields.forEach(function (f) { sums[f] = 0; });
+  Object.keys(weeksObj).forEach(function (weekKey) {
+    if (weekKey.indexOf(monthPrefix) !== 0) return;
+    var week = weeksObj[weekKey];
+    if (!week) return;
+    count++;
+    pctFields.forEach(function (f) { sums[f] += (week[f] || 0); });
+  });
+  if (count === 0) return null;
+  var result = { sessions: totals.sessions };
+  pctFields.forEach(function (f) { result[f] = sums[f] / count; });
+  return result;
+}
+
+function aggregateMonthlyAds(weeksObj, monthPrefix) {
+  var totals = aggregateMonthlyWeeks(weeksObj, monthPrefix, ["spend", "clicks", "impressions", "conversions", "convValue"], []);
+  if (!totals) return null;
+  return {
+    spend: totals.spend, clicks: totals.clicks, impressions: totals.impressions,
+    conversions: totals.conversions, convValue: totals.convValue,
+    ctr: totals.impressions ? (totals.clicks / totals.impressions) * 100 : 0,
+    cpa: totals.conversions ? totals.spend / totals.conversions : null,
+    roas: totals.spend ? totals.convValue / totals.spend : null,
+  };
+}
+
+function aggregateMonthlyDaily(byDate, monthPrefix) {
+  if (!byDate) return null;
+  var sales = 0, orders = 0, profit = 0, matchedAny = false;
+  Object.keys(byDate).forEach(function (dateKey) {
+    if (dateKey.indexOf(monthPrefix) !== 0) return;
+    matchedAny = true;
+    var day = byDate[dateKey];
+    sales += day.sales; orders += day.orders; profit += day.profit;
+  });
+  if (!matchedAny) return null;
+  return { sales: sales, orders: orders, profit: profit, aov: orders ? sales / orders : 0, profitPct: sales ? (profit / sales) * 100 : 0 };
+}
+
+function statusColor(value, thresholds, invert) {
+  var good = thresholds.good, warn = thresholds.warn;
+  if (value === null || value === undefined || isNaN(value)) return COLORS.textFaint;
+  var isGood = invert ? value <= good : value >= good;
+  var isWarn = invert ? value <= warn : value >= warn;
+  if (isGood) return COLORS.green;
+  if (isWarn) return COLORS.orange;
+  return COLORS.red;
+}
+
+function SplitCard(props) {
+  var children = [
+    h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: COLORS.textMuted, marginBottom: 6 } }, props.label),
+    h("div", { style: { fontFamily: "'Oswald', sans-serif", fontWeight: 600, fontSize: props.big ? 40 : 26, color: COLORS.text, lineHeight: 1 } }, props.value),
+  ];
+  if (props.sub) { children.push(h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: COLORS.textMuted, marginTop: 6 } }, props.sub)); }
+  return h("div", {
+    style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderLeft: "4px solid " + (props.color || COLORS.textFaint), borderRadius: 6, padding: props.big ? "22px 24px" : "16px 18px", minWidth: 0 }
+  }, children);
+}
+
+function SectionHeading(props) {
+  return h("div", {
+    style: Object.assign({ fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: "0.1em", textTransform: "uppercase", color: COLORS.accent, borderBottom: "1px solid " + COLORS.panelBorder, paddingBottom: 8, marginBottom: 14, marginTop: 30 }, props.style || {})
+  }, props.children);
+}
+
+function MiniStat(props) {
+  return h("div", null,
+    h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: COLORS.textMuted } }, props.label),
+    h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, color: props.color || COLORS.text, marginTop: 3 } }, props.value)
+  );
+}
+
+function EmptyNote(props) { return h("div", { style: { color: COLORS.textFaint, fontFamily: "'Inter', sans-serif", fontSize: 13 } }, props.text); }
+
+function fmtCurrency(n) { return n === null || n === undefined ? "—" : "A$" + Math.round(n).toLocaleString(); }
+function fmtPct(n, d) { d = d === undefined ? 1 : d; return n === null || n === undefined || isNaN(n) ? "—" : n.toFixed(d) + "%"; }
+function fmtNum(n) { return n === null || n === undefined ? "—" : Math.round(n).toLocaleString(); }
+function fmtRoas(n) { return n === null || n === undefined ? "—" : n.toFixed(2) + "x"; }
+
+function TraakDashboard() {
+  var dataState = useState({});
+  var data = dataState[0], setData = dataState[1];
+  var loadingState = useState(false);
+  var loading = loadingState[0], setLoading = loadingState[1];
+  var errorsState = useState({});
+  var errors = errorsState[0], setErrors = errorsState[1];
+  var lastRefreshedState = useState(null);
+  var lastRefreshed = lastRefreshedState[0], setLastRefreshed = lastRefreshedState[1];
+  
+  var [selectedDate, setSelectedDate] = useState("");
+  var [selectedWeek, setSelectedWeek] = useState(getPreviousWeekMonday());
+  var [selectedMonth, setSelectedMonth] = useState(getCurrentMonthPrefix());
+
+  var refresh = useCallback(function () {
+    setLoading(true);
+    var newData = {}, newErrors = {};
+    var jobs = [
+      ["dailyTracker", parseDailyTracker],
+      ["stockForecast", parseStockForecast],
+      ["conversionFunnel", parseConversionFunnel],
+      ["metaAds", function (rows) { return parseAdsPlatform(rows, "meta"); }],
+      ["googleAds", function (rows) { return parseAdsPlatform(rows, "google"); }],
+      ["klaviyo", parseKlaviyo],
+      ["monthlyRecommendations", parseRecommendationsTab],
+      ["weeklyAdRecommendations", parseRecommendationsTab],
+    ];
+    
+    var TEXT_HEAVY_KEYS = ["monthlyRecommendations", "weeklyAdRecommendations"];
+
+    var sequence = Promise.resolve();
+    jobs.forEach(function (job) {
+      sequence = sequence.then(function() {
+        var key = job[0], parser = job[1], spec = SOURCE_SPECS[key];
+        var fetcher = TEXT_HEAVY_KEYS.indexOf(key) !== -1 ? fetchGvizAsJsonRows : fetchGvizAsRows;
+        return fetcher(spec.sheetId, spec.tabName)
+          .then(function (rows) { newData[key] = parser(rows); })
+          .catch(function (e) { newErrors[key] = "Connection Error"; });
+      }).then(function() {
+        return new Promise(function(resolve) { setTimeout(resolve, 600); });
+      });
+    });
+
+    sequence.then(function () {
+      setData(newData); setErrors(newErrors); setLastRefreshed(new Date()); setLoading(false);
+      if (newData.dailyTracker && newData.dailyTracker.dates.length > 0 && !selectedDate) {
+          setSelectedDate(newData.dailyTracker.dates[newData.dailyTracker.dates.length - 1]);
+      }
+    });
+  }, [selectedDate]);
+
+  useEffect(function () { refresh(); }, []);
+
+  var dayData = (data.dailyTracker && selectedDate) ? data.dailyTracker.byDate[selectedDate] : null;
+  var weekCf = data.conversionFunnel ? data.conversionFunnel[selectedWeek] : null;
+  var weekMeta = data.metaAds ? data.metaAds[selectedWeek] : null;
+  var weekGoogle = data.googleAds ? data.googleAds[selectedWeek] : null;
+  var weekKl = data.klaviyo ? data.klaviyo[selectedWeek] : null;
+  var stock = data.stockForecast;
+
+  var monthFunnel = aggregateMonthlyFunnel(data.conversionFunnel, selectedMonth);
+  var monthMeta = aggregateMonthlyAds(data.metaAds, selectedMonth);
+  var monthGoogle = aggregateMonthlyAds(data.googleAds, selectedMonth);
+  var monthDaily = aggregateMonthlyDaily(data.dailyTracker ? data.dailyTracker.byDate : null, selectedMonth);
+  var monthlyRec = data.monthlyRecommendations;
+  var weeklyAdRec = data.weeklyAdRecommendations;
+
+  var headerRow = h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 } },
+    h("div", null,
+      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: "0.15em", color: COLORS.accent, textTransform: "uppercase" } }, "Traak Running"),
+      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 30, fontWeight: 600 } }, "Executive Dashboard")
+    ),
+    h("div", { style: { display: "flex", gap: 10, alignItems: "center" } },
+      h("span", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.textFaint } }, lastRefreshed ? "Updated " + lastRefreshed.toLocaleTimeString() : ""),
+      h("button", { onClick: refresh, disabled: loading, style: { background: "transparent", border: "1px solid " + COLORS.panelBorder, color: COLORS.text, borderRadius: 5, padding: "7px 14px", fontFamily: "'Inter', sans-serif", fontSize: 12, cursor: "pointer" } }, loading ? "Syncing Tabs..." : "Refresh")
+    )
+  );
+
+  var dailyControls = h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 26, marginBottom: 14 } },
+      h(SectionHeading, { style: { margin: 0, padding: 0, border: "none" } }, "Daily Ops Report"),
+      data.dailyTracker && h("select", {
+          value: selectedDate, onChange: function(e) { setSelectedDate(e.target.value); },
+          style: { background: COLORS.panel, color: COLORS.text, border: "1px solid " + COLORS.panelBorder, padding: "4px 8px", borderRadius: 4, outline: "none", fontFamily: "'Inter', sans-serif" }
+      }, data.dailyTracker.dates.map(function(d) { return h("option", { key: d, value: d }, d); }))
+  );
+
+  var dailyGrid = dayData ? h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14 } },
+    h(SplitCard, { big: true, label: "Sales", value: fmtCurrency(dayData.sales), color: COLORS.lane }),
+    h(SplitCard, { big: true, label: "Profit", value: fmtCurrency(dayData.profit), sub: fmtPct(dayData.profitPct) + " margin", color: statusColor(dayData.profitPct, { good: 15, warn: 8 }) }),
+    h(SplitCard, { big: true, label: "Orders", value: fmtNum(dayData.orders), sub: "AOV " + fmtCurrency(dayData.aov), color: COLORS.lane }),
+    h(SplitCard, { big: true, label: "Sessions", value: fmtNum(dayData.sessions), color: COLORS.lane }),
+    h(SplitCard, { big: true, label: "Meta Spend", value: fmtCurrency(dayData.meta), color: COLORS.lane }),
+    h(SplitCard, { big: true, label: "Google Spend", value: fmtCurrency(dayData.google), color: COLORS.lane })
+  ) : h(EmptyNote, { text: errors.dailyTracker || "Loading daily data..." });
+
+  var weeklyControls = h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 40, marginBottom: 14, borderBottom: "1px solid " + COLORS.panelBorder, paddingBottom: 8 } },
+      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: "0.1em", textTransform: "uppercase", color: COLORS.accent } }, "Weekly Marketing & Retention"),
+      h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: COLORS.textMuted } },
+          "Week Starting: ", h("input", { type: "date", value: selectedWeek, onChange: function(e) { setSelectedWeek(e.target.value); }, style: { background: COLORS.panel, color: COLORS.text, border: "1px solid " + COLORS.panelBorder, padding: "2px 6px", borderRadius: 4, colorScheme: "dark" } })
+      )
+  );
+
+  var trafficGrid = h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, marginBottom: 14 } },
+    h(SplitCard, { label: "Sessions", value: weekCf ? fmtNum(weekCf.sessions) : (errors.conversionFunnel || "…"), color: COLORS.lane }),
+    h(SplitCard, { label: "Sessions → PDP", value: weekCf ? fmtPct(weekCf.sessionsToPdp) : "…", color: statusColor(weekCf && weekCf.sessionsToPdp, { good: 100, warn: 80 }) }),
+    h(SplitCard, { label: "PDP → ATC", value: weekCf ? fmtPct(weekCf.pdpToAtc) : "…", sub: "Primary health metric", color: statusColor(weekCf && weekCf.pdpToAtc, { good: 10, warn: 6 }) }),
+    h(SplitCard, { label: "ATC → Checkout", value: weekCf ? fmtPct(weekCf.atcToCheckout) : "…", color: statusColor(weekCf && weekCf.atcToCheckout, { good: 50, warn: 30 }) }),
+    h(SplitCard, { label: "Checkout → Order", value: weekCf ? fmtPct(weekCf.checkoutToTransaction) : "…", color: statusColor(weekCf && weekCf.checkoutToTransaction, { good: 50, warn: 30 }) })
+  );
+
+  function adPlatformCard(title, platformData, errKey) {
+    var body = platformData ? h("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 } },
+      h(MiniStat, { label: "Spend", value: fmtCurrency(platformData.spend) }),
+      h(MiniStat, { label: "Revenue", value: fmtCurrency(platformData.convValue) }),
+      h(MiniStat, { label: "ROAS", value: fmtRoas(platformData.roas), color: statusColor(platformData.roas, { good: 2.5, warn: 2 }) }),
+      h(MiniStat, { label: "CPA", value: fmtCurrency(platformData.cpa), color: statusColor(platformData.cpa, { good: 33, warn: 40 }, true) }),
+      h(MiniStat, { label: "Conversions", value: fmtNum(platformData.conversions) }),
+      h(MiniStat, { label: "Clicks", value: fmtNum(platformData.clicks) }),
+      h(MiniStat, { label: "CTR", value: fmtPct(platformData.ctr), color: statusColor(platformData.ctr, { good: 1, warn: 0.5 }) })
+    ) : h(EmptyNote, { text: errors[errKey] || "No data for this week" });
+    return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, title), body
+    );
+  }
+
+  var adsRow = h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 } },
+    adPlatformCard("META ADS", weekMeta, "metaAds"), adPlatformCard("GOOGLE ADS", weekGoogle, "googleAds")
+  );
+
+  function klaviyoCard(title, sectionData) {
+    var body = sectionData ? h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 } },
+      h(MiniStat, { label: "Open Rate", value: fmtPct(sectionData.openRate), color: statusColor(sectionData.openRate, { good: 25, warn: 10 }) }),
+      h(MiniStat, { label: "Click Rate", value: fmtPct(sectionData.clickRate) }), h(MiniStat, { label: "Revenue", value: fmtCurrency(sectionData.revenue) })
+    ) : h(EmptyNote, { text: errors.klaviyo || "No data for this week" });
+    return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, title), body
+    );
+  }
+
+  var klaviyoRow = h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 } },
+    klaviyoCard("CAMPAIGNS (Klaviyo)", weekKl && weekKl.campaigns), klaviyoCard("FLOWS (Klaviyo)", weekKl && weekKl.flows)
+  );
+
+  var inventoryBody;
+  if (stock) {
+    if (stock.urgentCount === 0) { inventoryBody = h("div", { style: { color: COLORS.green, fontSize: 14 } }, "Nothing needs reordering right now."); } 
+    else {
+      inventoryBody = h(React.Fragment, null,
+        h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 22, color: COLORS.red, marginBottom: 10 } }, stock.urgentCount + " product" + (stock.urgentCount === 1 ? "" : "s") + " need reordering"),
+        h("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+          stock.urgent.map(function (p, i) {
+            return h("div", { key: i, style: { display: "flex", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, borderBottom: i < stock.urgent.length - 1 ? "1px solid " + COLORS.panelBorder : "none", paddingBottom: 6 } }, 
+            h("span", null, p.name), h("span", { style: { color: COLORS.textMuted } }, p.qty + " on hand"));
+          })
+        )
+      );
+    }
+  } else { inventoryBody = h(EmptyNote, { text: errors.stockForecast || "Loading inventory..." }); }
+
+  var inventorySection = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } }, inventoryBody);
+
+  // --- Monthly Analytics section ---
+  var monthlyControls = h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 40, marginBottom: 14, borderBottom: "1px solid " + COLORS.panelBorder, paddingBottom: 8 } },
+      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: "0.1em", textTransform: "uppercase", color: COLORS.accent } }, "Monthly Analytics"),
+      h("input", { type: "month", value: selectedMonth, onChange: function(e) { setSelectedMonth(e.target.value); }, style: { background: COLORS.panel, color: COLORS.text, border: "1px solid " + COLORS.panelBorder, padding: "2px 6px", borderRadius: 4, colorScheme: "dark", fontFamily: "'IBM Plex Mono', monospace" } })
+  );
+
+  var monthlyGrid = h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14, marginBottom: 14 } },
+    h(SplitCard, { big: true, label: "Sales (month)", value: monthDaily ? fmtCurrency(monthDaily.sales) : "…", color: COLORS.lane }),
+    h(SplitCard, { big: true, label: "Profit (month)", value: monthDaily ? fmtCurrency(monthDaily.profit) : "…", sub: monthDaily ? fmtPct(monthDaily.profitPct) + " margin" : null, color: statusColor(monthDaily && monthDaily.profitPct, { good: 15, warn: 8 }) }),
+    h(SplitCard, { big: true, label: "Orders (month)", value: monthDaily ? fmtNum(monthDaily.orders) : "…", sub: monthDaily ? "AOV " + fmtCurrency(monthDaily.aov) : null, color: COLORS.lane }),
+    h(SplitCard, { big: true, label: "Sessions (month)", value: monthFunnel ? fmtNum(monthFunnel.sessions) : "…", color: COLORS.lane })
+  );
+
+  var monthlyAdsRow = h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 } },
+    (function () {
+      var body = monthMeta ? h("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 } },
+        h(MiniStat, { label: "Spend", value: fmtCurrency(monthMeta.spend) }),
+        h(MiniStat, { label: "Revenue", value: fmtCurrency(monthMeta.convValue) }),
+        h(MiniStat, { label: "ROAS", value: fmtRoas(monthMeta.roas), color: statusColor(monthMeta.roas, { good: 2.5, warn: 2 }) }),
+        h(MiniStat, { label: "CPA", value: fmtCurrency(monthMeta.cpa), color: statusColor(monthMeta.cpa, { good: 33, warn: 40 }, true) })
+      ) : h(EmptyNote, { text: "No data for this month" });
+      return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+        h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, "META ADS (month)"), body);
+    })(),
+    (function () {
+      var body = monthGoogle ? h("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 } },
+        h(MiniStat, { label: "Spend", value: fmtCurrency(monthGoogle.spend) }),
+        h(MiniStat, { label: "Revenue", value: fmtCurrency(monthGoogle.convValue) }),
+        h(MiniStat, { label: "ROAS", value: fmtRoas(monthGoogle.roas), color: statusColor(monthGoogle.roas, { good: 2.5, warn: 2 }) }),
+        h(MiniStat, { label: "CPA", value: fmtCurrency(monthGoogle.cpa), color: statusColor(monthGoogle.cpa, { good: 33, warn: 40 }, true) })
+      ) : h(EmptyNote, { text: "No data for this month" });
+      return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+        h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, "GOOGLE ADS (month)"), body);
+    })()
+  );
+
+  var monthlyFunnelNote = h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 11, color: COLORS.textFaint, marginBottom: 14 } },
+    "Note: monthly funnel %s are averaged across the month's weeks (an approximation) since only weekly %s, not raw counts, are stored per week.");
+
+  // --- AI Recommendations section (monthly + weekly ad-only) ---
+  var recommendationsHeading = h(SectionHeading, null, "AI Recommendations");
+
+  var monthlyRecCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18, marginBottom: 14 } },
+    h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } },
+      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14 } }, "Monthly Priorities" + (monthlyRec ? " — " + monthlyRec.period : "")),
+      h("button", { onClick: refresh, disabled: loading, style: { background: "transparent", border: "1px solid " + COLORS.panelBorder, color: COLORS.text, borderRadius: 5, padding: "5px 12px", fontFamily: "'Inter', sans-serif", fontSize: 11, cursor: "pointer" } }, "Refresh")
+    ),
+    monthlyRec ? h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" } }, monthlyRec.text)
+               : h(EmptyNote, { text: errors.monthlyRecommendations || "No monthly report generated yet" })
+  );
+
+  var weeklyAdRecCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+    h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 10 } }, "Weekly Ad Priorities" + (weeklyAdRec ? " — " + weeklyAdRec.period : "")),
+    weeklyAdRec ? h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" } }, weeklyAdRec.text)
+                : h(EmptyNote, { text: errors.weeklyAdRecommendations || "No weekly ad report generated yet" })
+  );
+
+  return h("div", { style: { background: COLORS.bg, minHeight: "100vh", color: COLORS.text, fontFamily: "'Inter', sans-serif", padding: "28px 32px 60px" } },
+    headerRow, dailyControls, dailyGrid, weeklyControls, trafficGrid, adsRow, klaviyoRow, h(SectionHeading, null, "Inventory Alerts"), inventorySection,
+    monthlyControls, monthlyGrid, monthlyAdsRow, monthlyFunnelNote,
+    recommendationsHeading, monthlyRecCard, weeklyAdRecCard
+  );
+}
+
+var root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(h(TraakDashboard));
+})();
+</script>
+</body>
+</html>
