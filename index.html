@@ -35,6 +35,13 @@ var KNOWN_SHEETS = {
   stockForecast: "1jrC_3zrEs4KJTrC-Mn37NHAA62zWM1oNG_awEZapXLg",
 };
 
+// Apps Script Web App that backs the To-Do List card. Paste the deployed
+// /exec URL here (Extensions -> Apps Script -> Deploy -> Web app).
+// Until it is set, the To-Do card renders a setup note instead of erroring.
+// This URL is not a secret in the usual sense -- it is public by design, which
+// is why the script behind it can only ever touch the "To-Do List" tab.
+var TODO_WEB_APP_URL = "";
+
 function gvizUrl(sheetId, tabName) {
   var base = "https://docs.google.com/spreadsheets/d/" + sheetId + "/gviz/tq?tqx=out:csv&headers=0&t=" + Date.now();
   return tabName ? base + "&sheet=" + encodeURIComponent(tabName) : base;
@@ -92,6 +99,39 @@ function fetchGvizAsJsonRows(sheetId, tabName) {
         });
       });
       return [headerRow].concat(dataRows);
+    });
+}
+
+function fetchTodos() {
+  return fetch(TODO_WEB_APP_URL + "?t=" + Date.now())
+    .then(function (res) {
+      if (!res.ok) throw new Error("HTTP Error " + res.status);
+      return res.json();
+    })
+    .then(function (payload) {
+      if (!payload.ok) throw new Error(payload.error || "Web App returned an error");
+      return payload.tasks || [];
+    });
+}
+
+function postTodo(body) {
+  // Sent as text/plain deliberately. That makes this a CORS "simple request",
+  // so the browser skips the preflight OPTIONS call -- Apps Script Web Apps do
+  // not answer preflight, so application/json fails here with a CORS error even
+  // when the script itself is fine. The Apps Script reads e.postData.contents,
+  // so the declared type does not matter on its side.
+  return fetch(TODO_WEB_APP_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify(body)
+  })
+    .then(function (res) {
+      if (!res.ok) throw new Error("HTTP Error " + res.status);
+      return res.json();
+    })
+    .then(function (payload) {
+      if (!payload.ok) throw new Error(payload.error || "Web App returned an error");
+      return payload.tasks || [];
     });
 }
 
@@ -373,6 +413,42 @@ function TraakDashboard() {
   var [selectedWeek, setSelectedWeek] = useState(getPreviousWeekMonday());
   var [selectedMonth, setSelectedMonth] = useState(getCurrentMonthPrefix());
 
+  var [todos, setTodos] = useState([]);
+  var [todoError, setTodoError] = useState("");
+  var [todoBusy, setTodoBusy] = useState(false);
+  var [newTask, setNewTask] = useState("");
+
+  var loadTodos = useCallback(function () {
+    if (!TODO_WEB_APP_URL) return;
+    setTodoBusy(true);
+    fetchTodos()
+      .then(function (tasks) { setTodos(tasks); setTodoError(""); })
+      .catch(function (e) { setTodoError(String(e.message || e)); })
+      .then(function () { setTodoBusy(false); });
+  }, []);
+
+  var sendTodo = useCallback(function (body) {
+    if (!TODO_WEB_APP_URL) return;
+    setTodoBusy(true);
+    postTodo(body)
+      // The Web App returns the full list after every write, so the card
+      // updates from the sheet's real state rather than a local guess.
+      .then(function (tasks) { setTodos(tasks); setTodoError(""); })
+      .catch(function (e) { setTodoError(String(e.message || e)); })
+      .then(function () { setTodoBusy(false); });
+  }, []);
+
+  var toggleTodo = useCallback(function (task) {
+    sendTodo({ action: task.status === "Done" ? "open" : "done", row: task.row });
+  }, [sendTodo]);
+
+  var addTodo = useCallback(function () {
+    var text = (newTask || "").trim();
+    if (!text) return;
+    setNewTask("");
+    sendTodo({ action: "add", task: text, source: "Manual" });
+  }, [newTask, sendTodo]);
+
   var refresh = useCallback(function () {
     setLoading(true);
     var newData = {}, newErrors = {};
@@ -410,7 +486,7 @@ function TraakDashboard() {
     });
   }, [selectedDate]);
 
-  useEffect(function () { refresh(); }, []);
+  useEffect(function () { refresh(); loadTodos(); }, []);
 
   var dayData = (data.dailyTracker && selectedDate) ? data.dailyTracker.byDate[selectedDate] : null;
   var weekCf = data.conversionFunnel ? data.conversionFunnel[selectedWeek] : null;
@@ -577,10 +653,87 @@ function TraakDashboard() {
                 : h(EmptyNote, { text: errors.weeklyAdRecommendations || "No weekly ad report generated yet" })
   );
 
+  // --- To-Do List (Apps Script Web App backed) ---
+  var todoHeading = h(SectionHeading, null, "To-Do List");
+
+  var openCount = todos.filter(function (t) { return t.status !== "Done"; }).length;
+
+  // Open items first, then completed ones, each keeping sheet order.
+  var sortedTodos = todos.slice().sort(function (a, b) {
+    var aDone = a.status === "Done" ? 1 : 0, bDone = b.status === "Done" ? 1 : 0;
+    return aDone - bDone || a.row - b.row;
+  });
+
+  var todoRows = sortedTodos.map(function (task, i) {
+    var done = task.status === "Done";
+    var isAi = String(task.source).toLowerCase() === "ai";
+    return h("div", {
+      key: task.row,
+      style: { display: "flex", alignItems: "flex-start", gap: 10, padding: "9px 0",
+               borderBottom: i < sortedTodos.length - 1 ? "1px solid " + COLORS.panelBorder : "none" }
+    },
+      h("input", {
+        type: "checkbox", checked: done, disabled: todoBusy,
+        onChange: function () { toggleTodo(task); },
+        style: { marginTop: 3, width: 15, height: 15, accentColor: COLORS.accent, cursor: todoBusy ? "wait" : "pointer", flexShrink: 0 }
+      }),
+      h("div", { style: { flex: 1, minWidth: 0 } },
+        h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 13, lineHeight: 1.5,
+                            color: done ? COLORS.textFaint : COLORS.text,
+                            textDecoration: done ? "line-through" : "none" } }, task.task),
+        h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.textFaint, marginTop: 3 } },
+          (isAi ? "AI" : "MANUAL") + (task.dateAdded ? " · " + task.dateAdded : ""))
+      ),
+      isAi ? h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 9, letterSpacing: "0.08em",
+                                 color: COLORS.accent, border: "1px solid " + COLORS.accent, borderRadius: 3,
+                                 padding: "1px 5px", marginTop: 2, flexShrink: 0 } }, "AI") : null
+    );
+  });
+
+  var todoBody;
+  if (!TODO_WEB_APP_URL) {
+    todoBody = h(EmptyNote, { text: "Not connected yet — paste the Apps Script Web App /exec URL into TODO_WEB_APP_URL at the top of this file." });
+  } else if (todoError) {
+    todoBody = h(EmptyNote, { text: "Could not reach the To-Do List: " + todoError });
+  } else if (!todos.length) {
+    todoBody = h(EmptyNote, { text: todoBusy ? "Loading…" : "Nothing on the list" });
+  } else {
+    todoBody = h("div", null, todoRows);
+  }
+
+  var inputStyle = { flex: 1, background: COLORS.bg, border: "1px solid " + COLORS.panelBorder,
+                     color: COLORS.text, borderRadius: 5, padding: "7px 10px",
+                     fontFamily: "'Inter', sans-serif", fontSize: 13, outline: "none", minWidth: 0 };
+
+  var todoCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+    h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } },
+      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14 } },
+        "Open Items" + (todos.length ? " — " + openCount + " of " + todos.length : "")),
+      h("button", { onClick: loadTodos, disabled: todoBusy || !TODO_WEB_APP_URL,
+        style: { background: "transparent", border: "1px solid " + COLORS.panelBorder, color: COLORS.text, borderRadius: 5, padding: "5px 12px", fontFamily: "'Inter', sans-serif", fontSize: 11, cursor: "pointer" } },
+        todoBusy ? "Working…" : "Refresh")
+    ),
+    todoBody,
+    h("div", { style: { display: "flex", gap: 8, marginTop: 14 } },
+      h("input", {
+        type: "text", value: newTask, placeholder: "Add a task…", disabled: todoBusy || !TODO_WEB_APP_URL,
+        onChange: function (e) { setNewTask(e.target.value); },
+        onKeyDown: function (e) { if (e.key === "Enter") addTodo(); },
+        style: inputStyle
+      }),
+      h("button", { onClick: addTodo, disabled: todoBusy || !TODO_WEB_APP_URL || !newTask.trim(),
+        style: { background: COLORS.accent, border: "none", color: COLORS.bg, borderRadius: 5, padding: "7px 16px",
+                 fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: "0.05em",
+                 cursor: (todoBusy || !newTask.trim()) ? "default" : "pointer",
+                 opacity: (todoBusy || !newTask.trim()) ? 0.5 : 1 } }, "ADD")
+    )
+  );
+
   return h("div", { style: { background: COLORS.bg, minHeight: "100vh", color: COLORS.text, fontFamily: "'Inter', sans-serif", padding: "28px 32px 60px" } },
     headerRow, dailyControls, dailyGrid, weeklyControls, trafficGrid, adsRow, klaviyoRow, h(SectionHeading, null, "Inventory Alerts"), inventorySection,
     monthlyControls, monthlyGrid, monthlyAdsRow, monthlyFunnelNote,
-    recommendationsHeading, monthlyRecCard, weeklyAdRecCard
+    recommendationsHeading, monthlyRecCard, weeklyAdRecCard,
+    todoHeading, todoCard
   );
 }
 
