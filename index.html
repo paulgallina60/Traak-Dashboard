@@ -70,7 +70,7 @@ function fetchGvizAsRows(sheetId, tabName) {
     });
 }
 
-function fetchGvizAsJsonRows(sheetId, tabName) {
+function fetchGvizAsJsonRows(sheetId, tabName, headerRowCount) {
   // Used specifically for text-heavy tabs (AI recommendations) -- CSV
   // export was returning an empty response (200 OK, Content-Length: 0) for
   // cells containing long multi-paragraph text. JSON handles long text
@@ -79,7 +79,17 @@ function fetchGvizAsJsonRows(sheetId, tabName) {
   // headers=1 forces explicit recognition of the real header row, and we
   // rebuild a combined [header, ...dataRows] array afterward so downstream
   // code sees the same shape it always has.
-  var url = "https://docs.google.com/spreadsheets/d/" + sheetId + "/gviz/tq?tqx=out:json&headers=1&t=" + Date.now();
+  //
+  // headerRowCount matters more than it looks. The CSV endpoint silently DROPS
+  // the sheet's header rows -- row 0 of its response is already data -- so there
+  // is no way to learn the column names from it, and any code reading that
+  // response has to hard-code positions. The JSON endpoint exposes the real
+  // header text as table.cols[].label, but only when told how many rows above
+  // the data are headers. The Daily Tracker has two (a cosmetic group-label row,
+  // then the real header), hence headers=2 for that tab; the recommendation tabs
+  // have one.
+  var headers = headerRowCount === undefined ? 1 : headerRowCount;
+  var url = "https://docs.google.com/spreadsheets/d/" + sheetId + "/gviz/tq?tqx=out:json&headers=" + headers + "&t=" + Date.now();
   if (tabName) url += "&sheet=" + encodeURIComponent(tabName);
   return fetch(url).then(function (res) {
       if (!res.ok) throw new Error("HTTP Error " + res.status);
@@ -94,7 +104,14 @@ function fetchGvizAsJsonRows(sheetId, tabName) {
       var dataRows = (data.table.rows || []).map(function (row) {
         return data.table.cols.map(function (col, i) {
           var cell = row.c ? row.c[i] : null;
-          if (!cell || cell.v === null || cell.v === undefined) return "";
+          if (!cell) return "";
+          // Prefer the FORMATTED value. The JSON endpoint returns a date's raw
+          // value as the string "Date(2026,6,25)", which no date parser here
+          // recognises -- every row was silently skipped as undated. `f` carries
+          // "2026-07-25", and for numbers "$101.00", which is exactly the shape
+          // the CSV endpoint produced, so downstream parsers need no changes.
+          if (cell.f !== null && cell.f !== undefined) return String(cell.f);
+          if (cell.v === null || cell.v === undefined) return "";
           return String(cell.v);
         });
       });
@@ -566,14 +583,22 @@ function TraakDashboard() {
       ["weeklyAdRecommendations", parseRecommendationsTab],
     ];
     
-    var TEXT_HEAVY_KEYS = ["monthlyRecommendations", "weeklyAdRecommendations"];
+    // Tabs that must go through the JSON endpoint, and how many header rows
+    // each has. Recommendations: because CSV returns an empty body for long
+    // multi-paragraph cells. Daily Tracker: because only JSON exposes the column
+    // names, which is what lets parseDailyTracker find PROFIT by header instead
+    // of by a position that shifts whenever a column is inserted.
+    var JSON_TABS = { monthlyRecommendations: 1, weeklyAdRecommendations: 1, dailyTracker: 2 };
 
     var sequence = Promise.resolve();
     jobs.forEach(function (job) {
       sequence = sequence.then(function() {
         var key = job[0], parser = job[1], spec = SOURCE_SPECS[key];
-        var fetcher = TEXT_HEAVY_KEYS.indexOf(key) !== -1 ? fetchGvizAsJsonRows : fetchGvizAsRows;
-        return fetcher(spec.sheetId, spec.tabName)
+        var jsonHeaderRows = JSON_TABS[key];
+        var fetch_ = jsonHeaderRows === undefined
+          ? fetchGvizAsRows(spec.sheetId, spec.tabName)
+          : fetchGvizAsJsonRows(spec.sheetId, spec.tabName, jsonHeaderRows);
+        return fetch_
           .then(function (rows) { newData[key] = parser(rows); })
           .catch(function (e) { newErrors[key] = "Connection Error"; });
       }).then(function() {
