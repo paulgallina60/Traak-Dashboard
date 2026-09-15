@@ -40,7 +40,7 @@ var KNOWN_SHEETS = {
 // Until it is set, the To-Do card renders a setup note instead of erroring.
 // This URL is not a secret in the usual sense -- it is public by design, which
 // is why the script behind it can only ever touch the "To-Do List" tab.
-var TODO_WEB_APP_URL = "";
+var TODO_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbymld3TuWOxNnSS9Pa8-2aCFpMS-Fg43FiRPKibHRBNwofnFGNxYAlhvXYnsFv2tCCD/exec";
 
 function gvizUrl(sheetId, tabName) {
   var base = "https://docs.google.com/spreadsheets/d/" + sheetId + "/gviz/tq?tqx=out:csv&headers=0&t=" + Date.now();
