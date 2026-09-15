@@ -195,6 +195,22 @@ function colIndex(headerRow, name) {
   return -1;
 }
 
+// Substring variant of colIndex. The Conversion Funnel tab has two header
+// rows, which gviz concatenates into labels like "Sessions GA4" and
+// "Checkout Started Shopify", so exact matching does not work there.
+// `mustNotContain` keeps "Sessions GA4" from being confused with
+// "Sessions -> PDP % Calculated", which also contains "sessions".
+function colIndexContains(headerRow, needle, mustNotContain) {
+  var target = String(needle).trim().toLowerCase();
+  for (var i = 0; i < (headerRow || []).length; i++) {
+    var label = String(headerRow[i] || "").trim().toLowerCase();
+    if (!label || label.indexOf(target) === -1) continue;
+    if (mustNotContain && label.indexOf(mustNotContain) !== -1) continue;
+    return i;
+  }
+  return -1;
+}
+
 function getPreviousWeekMonday() {
   var d = new Date();
   var day = d.getDay();
@@ -247,18 +263,54 @@ function parseDailyTracker(rows) {
 
 function parseConversionFunnel(rows) {
   if (!rows) return null;
+
+  // The tab stores RAW COUNTS alongside the percentages -- PDP Views, Add to
+  // Cart, Checkout Started and Transactions are all there. Earlier code read
+  // only the % columns, which is why the monthly funnel had to average weekly
+  // percentages instead of recomputing them. Capturing the counts lets the
+  // month be summed and its rates derived properly.
+  var headerRowIndex = findHeaderRow(rows, []) === -1 ? 0 : 0;
+  for (var hi = 0; hi < Math.min(rows.length, 4); hi++) {
+    if (colIndexContains(rows[hi], "sessions", "->") !== -1) { headerRowIndex = hi; break; }
+  }
+  var headers = rows[headerRowIndex] || [];
+
+  var idx = {
+    sessions:        colIndexContains(headers, "sessions", "->"),
+    pdpViews:        colIndexContains(headers, "pdp views"),
+    addToCart:       colIndexContains(headers, "add to cart"),
+    checkoutStarted: colIndexContains(headers, "checkout started"),
+    transactions:    colIndexContains(headers, "transactions", "->")
+  };
+
+  function count(row, key) {
+    return idx[key] === -1 ? null : toNumber(row[idx[key]]);
+  }
+  function pct(part, whole) {
+    return whole ? (part / whole) * 100 : 0;
+  }
+
   var weeks = {};
-  for (var i = 1; i < rows.length; i++) {
-      var r = rows[i];
-      var d = extractDate(r[0]);
-      if (!d) continue;
-      weeks[d] = {
-        sessions: toNumber(r[1]), 
-        sessionsToPdp: toNumber(r[2]), 
-        pdpToAtc: toNumber(r[4]), 
-        atcToCheckout: toNumber(r[6]), 
-        checkoutToTransaction: toNumber(r[8])
-      };
+  for (var i = headerRowIndex + 1; i < rows.length; i++) {
+    var r = rows[i];
+    var d = extractDate(r[0]);
+    if (!d) continue;
+
+    var sessions = count(r, "sessions"), pdpViews = count(r, "pdpViews"),
+        addToCart = count(r, "addToCart"), checkoutStarted = count(r, "checkoutStarted"),
+        transactions = count(r, "transactions");
+
+    weeks[d] = {
+      sessions: sessions,
+      pdpViews: pdpViews, addToCart: addToCart,
+      checkoutStarted: checkoutStarted, transactions: transactions,
+      // Recomputed from the counts rather than read from the % columns, so a
+      // week and a month are derived the same way.
+      sessionsToPdp: pct(pdpViews, sessions),
+      pdpToAtc: pct(addToCart, pdpViews),
+      atcToCheckout: pct(checkoutStarted, addToCart),
+      checkoutToTransaction: pct(transactions, checkoutStarted)
+    };
   }
   return weeks;
 }
@@ -379,25 +431,38 @@ function aggregateMonthlyWeeks(weeksObj, monthPrefix, sumFields, rateFields) {
 }
 
 function aggregateMonthlyFunnel(weeksObj, monthPrefix) {
-  var totals = aggregateMonthlyWeeks(weeksObj, monthPrefix, ["sessions"], []);
-  if (!totals) return null;
-  // Conversion Funnel's weekly rows only store %s, not raw PDP/ATC/Checkout
-  // counts, so an exact recompute isn't possible client-side -- average the
-  // %s across matched weeks instead, flagged as an approximation.
-  var pctFields = ["sessionsToPdp", "pdpToAtc", "atcToCheckout", "checkoutToTransaction"];
-  var sums = {}, count = 0;
-  pctFields.forEach(function (f) { sums[f] = 0; });
-  Object.keys(weeksObj).forEach(function (weekKey) {
+  // Sums the RAW counts across the month's weeks and recomputes each rate from
+  // those totals. Averaging weekly percentages (what this used to do) weights a
+  // 200-session week the same as a 1,200-session one, so the headline rate drifts
+  // away from the month's real conversion rate. Same approach monthly_data.py
+  // uses server-side.
+  var totals = { sessions: 0, pdpViews: 0, addToCart: 0, checkoutStarted: 0, transactions: 0 };
+  var weeksMatched = 0;
+
+  Object.keys(weeksObj || {}).forEach(function (weekKey) {
     if (weekKey.indexOf(monthPrefix) !== 0) return;
     var week = weeksObj[weekKey];
     if (!week) return;
-    count++;
-    pctFields.forEach(function (f) { sums[f] += (week[f] || 0); });
+    weeksMatched++;
+    Object.keys(totals).forEach(function (field) { totals[field] += (week[field] || 0); });
   });
-  if (count === 0) return null;
-  var result = { sessions: totals.sessions };
-  pctFields.forEach(function (f) { result[f] = sums[f] / count; });
-  return result;
+
+  if (weeksMatched === 0) return null;
+
+  function pct(part, whole) { return whole ? (part / whole) * 100 : 0; }
+
+  return {
+    sessions: totals.sessions,
+    pdpViews: totals.pdpViews,
+    addToCart: totals.addToCart,
+    checkoutStarted: totals.checkoutStarted,
+    transactions: totals.transactions,
+    weeksMatched: weeksMatched,
+    sessionsToPdp: pct(totals.pdpViews, totals.sessions),
+    pdpToAtc: pct(totals.addToCart, totals.pdpViews),
+    atcToCheckout: pct(totals.checkoutStarted, totals.addToCart),
+    checkoutToTransaction: pct(totals.transactions, totals.checkoutStarted)
+  };
 }
 
 function aggregateMonthlyAds(weeksObj, monthPrefix) {
@@ -588,7 +653,7 @@ function TraakDashboard() {
     // multi-paragraph cells. Daily Tracker: because only JSON exposes the column
     // names, which is what lets parseDailyTracker find PROFIT by header instead
     // of by a position that shifts whenever a column is inserted.
-    var JSON_TABS = { monthlyRecommendations: 1, weeklyAdRecommendations: 1, dailyTracker: 2 };
+    var JSON_TABS = { monthlyRecommendations: 1, weeklyAdRecommendations: 1, dailyTracker: 2, conversionFunnel: 2 };
 
     var sequence = Promise.resolve();
     jobs.forEach(function (job) {
@@ -733,8 +798,25 @@ function TraakDashboard() {
   var monthlyGrid = h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14, marginBottom: 14 } },
     h(SplitCard, { big: true, label: "Sales (month)", value: monthDaily ? fmtCurrency(monthDaily.sales) : "…", color: COLORS.lane }),
     h(SplitCard, { big: true, label: "Profit (month)", value: monthDaily ? fmtCurrency(monthDaily.profit) : "…", sub: monthDaily ? fmtPct(monthDaily.profitPct) + " margin" : null, color: statusColor(monthDaily && monthDaily.profitPct, { good: 15, warn: 8 }) }),
-    h(SplitCard, { big: true, label: "Orders (month)", value: monthDaily ? fmtNum(monthDaily.orders) : "…", sub: monthDaily ? "AOV " + fmtCurrency(monthDaily.aov) : null, color: COLORS.lane }),
-    h(SplitCard, { big: true, label: "Sessions (month)", value: monthFunnel ? fmtNum(monthFunnel.sessions) : "…", color: COLORS.lane })
+    h(SplitCard, { big: true, label: "Orders (month)", value: monthDaily ? fmtNum(monthDaily.orders) : "…", sub: monthDaily ? "AOV " + fmtCurrency(monthDaily.aov) : null, color: COLORS.lane })
+  );
+
+  // Monthly funnel -- same five metrics and same thresholds as the weekly row,
+  // so a month and a week can be read against each other without translation.
+  var monthlyFunnelGrid = h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, marginBottom: 14 } },
+    h(SplitCard, { label: "Sessions (month)", value: monthFunnel ? fmtNum(monthFunnel.sessions) : "…", color: COLORS.lane }),
+    h(SplitCard, { label: "Sessions \u2192 PDP", value: monthFunnel ? fmtPct(monthFunnel.sessionsToPdp) : "…",
+      sub: monthFunnel ? fmtNum(monthFunnel.pdpViews) + " PDP views" : null,
+      color: statusColor(monthFunnel && monthFunnel.sessionsToPdp, { good: 100, warn: 80 }) }),
+    h(SplitCard, { label: "PDP \u2192 ATC", value: monthFunnel ? fmtPct(monthFunnel.pdpToAtc) : "…",
+      sub: monthFunnel ? "Primary health metric" : null,
+      color: statusColor(monthFunnel && monthFunnel.pdpToAtc, { good: 10, warn: 6 }) }),
+    h(SplitCard, { label: "ATC \u2192 Checkout", value: monthFunnel ? fmtPct(monthFunnel.atcToCheckout) : "…",
+      sub: monthFunnel ? fmtNum(monthFunnel.addToCart) + " add to cart" : null,
+      color: statusColor(monthFunnel && monthFunnel.atcToCheckout, { good: 50, warn: 30 }) }),
+    h(SplitCard, { label: "Checkout \u2192 Order", value: monthFunnel ? fmtPct(monthFunnel.checkoutToTransaction) : "…",
+      sub: monthFunnel ? fmtNum(monthFunnel.transactions) + " orders" : null,
+      color: statusColor(monthFunnel && monthFunnel.checkoutToTransaction, { good: 50, warn: 30 }) })
   );
 
   var monthlyAdsRow = h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 } },
@@ -761,7 +843,11 @@ function TraakDashboard() {
   );
 
   var monthlyFunnelNote = h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 11, color: COLORS.textFaint, marginBottom: 14 } },
-    "Note: monthly funnel %s are averaged across the month's weeks (an approximation) since only weekly %s, not raw counts, are stored per week.");
+    monthFunnel
+      ? "Monthly funnel rates are recomputed from the month's summed raw counts across " +
+        monthFunnel.weeksMatched + " week" + (monthFunnel.weeksMatched === 1 ? "" : "s") +
+        " (weeks are attributed to the month their Monday falls in), not averaged from weekly percentages."
+      : "");
 
   // --- AI Recommendations section (monthly + weekly ad-only) ---
   var recommendationsHeading = h(SectionHeading, null, "AI Recommendations");
@@ -870,7 +956,7 @@ function TraakDashboard() {
       dailyControls, dailyGrid,
       weeklyControls, trafficGrid, adsRow, klaviyoRow,
       h(SectionHeading, null, "Inventory Alerts"), inventorySection,
-      monthlyControls, monthlyGrid, monthlyAdsRow, monthlyFunnelNote
+      monthlyControls, monthlyGrid, monthlyFunnelGrid, monthlyAdsRow, monthlyFunnelNote
     ];
   }
 
