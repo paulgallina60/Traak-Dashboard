@@ -385,6 +385,55 @@ function SectionHeading(props) {
   }, props.children);
 }
 
+var TABS = [
+  { key: "operations", label: "Operations" },
+  { key: "recommendations", label: "AI Recommendations" },
+  { key: "todo", label: "To-Do List" },
+];
+
+// Remembering the tab means a refresh (or the Refresh button) doesn't bounce
+// you back to Operations while you're reading something else. Wrapped because
+// storage throws outright in some privacy modes rather than just being empty.
+var TAB_STORAGE_KEY = "traak.activeTab";
+
+function loadStoredTab() {
+  try {
+    var stored = window.localStorage.getItem(TAB_STORAGE_KEY);
+    for (var i = 0; i < TABS.length; i++) { if (TABS[i].key === stored) return stored; }
+  } catch (e) { /* private mode / storage disabled -- fall through to default */ }
+  return TABS[0].key;
+}
+
+function storeTab(key) {
+  try { window.localStorage.setItem(TAB_STORAGE_KEY, key); } catch (e) { /* not worth failing over */ }
+}
+
+function TabBar(props) {
+  return h("div", {
+    style: { display: "flex", gap: 4, flexWrap: "wrap", borderBottom: "1px solid " + COLORS.panelBorder, marginTop: 22 }
+  }, TABS.map(function (tab) {
+    var active = tab.key === props.active;
+    return h("button", {
+      key: tab.key,
+      onClick: function () { props.onSelect(tab.key); },
+      style: {
+        background: "transparent",
+        border: "none",
+        borderBottom: "2px solid " + (active ? COLORS.accent : "transparent"),
+        color: active ? COLORS.accent : COLORS.textMuted,
+        fontFamily: "'Oswald', sans-serif",
+        fontSize: 14,
+        letterSpacing: "0.1em",
+        textTransform: "uppercase",
+        padding: "10px 16px",
+        marginBottom: -1,
+        cursor: "pointer",
+        transition: "color 120ms ease"
+      }
+    }, tab.label + (tab.key === "todo" && props.openTodos ? "  (" + props.openTodos + ")" : ""));
+  }));
+}
+
 function MiniStat(props) {
   return h("div", null,
     h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: COLORS.textMuted } }, props.label),
@@ -412,6 +461,10 @@ function TraakDashboard() {
   var [selectedDate, setSelectedDate] = useState("");
   var [selectedWeek, setSelectedWeek] = useState(getPreviousWeekMonday());
   var [selectedMonth, setSelectedMonth] = useState(getCurrentMonthPrefix());
+
+  var [activeTab, setActiveTab] = useState(loadStoredTab());
+
+  var selectTab = useCallback(function (key) { setActiveTab(key); storeTab(key); }, []);
 
   var [todos, setTodos] = useState([]);
   var [todoError, setTodoError] = useState("");
@@ -729,11 +782,27 @@ function TraakDashboard() {
     )
   );
 
+  // Each tab's contents. Every section above is still built on every render --
+  // only what gets mounted changes -- so switching tabs never refetches and the
+  // date/week/month pickers keep their selections.
+  var tabContent;
+  if (activeTab === "recommendations") {
+    tabContent = [recommendationsHeading, monthlyRecCard, weeklyAdRecCard];
+  } else if (activeTab === "todo") {
+    tabContent = [todoHeading, todoCard];
+  } else {
+    tabContent = [
+      dailyControls, dailyGrid,
+      weeklyControls, trafficGrid, adsRow, klaviyoRow,
+      h(SectionHeading, null, "Inventory Alerts"), inventorySection,
+      monthlyControls, monthlyGrid, monthlyAdsRow, monthlyFunnelNote
+    ];
+  }
+
   return h("div", { style: { background: COLORS.bg, minHeight: "100vh", color: COLORS.text, fontFamily: "'Inter', sans-serif", padding: "28px 32px 60px" } },
-    headerRow, dailyControls, dailyGrid, weeklyControls, trafficGrid, adsRow, klaviyoRow, h(SectionHeading, null, "Inventory Alerts"), inventorySection,
-    monthlyControls, monthlyGrid, monthlyAdsRow, monthlyFunnelNote,
-    recommendationsHeading, monthlyRecCard, weeklyAdRecCard,
-    todoHeading, todoCard
+    headerRow,
+    h(TabBar, { active: activeTab, onSelect: selectTab, openTodos: openCount }),
+    h("div", { key: activeTab }, tabContent)
   );
 }
 
