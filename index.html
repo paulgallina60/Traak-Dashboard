@@ -605,6 +605,11 @@ function TraakDashboard() {
   // Which parent's "add subtask" box is open, and what is typed in it.
   var [subtaskFor, setSubtaskFor] = useState("");
   var [subtaskDraft, setSubtaskDraft] = useState("");
+  // Which task is being edited, and the working copy of its text.
+  var [editingId, setEditingId] = useState("");
+  var [editDraft, setEditDraft] = useState("");
+  // Delete needs a second click to confirm -- no dialog, just a changed button.
+  var [confirmDelete, setConfirmDelete] = useState("");
 
   var loadTodos = useCallback(function () {
     if (!TODO_WEB_APP_URL) return;
@@ -638,6 +643,23 @@ function TraakDashboard() {
     setNewTask("");
     sendTodo({ action: "add", task: text, source: "Manual" });
   }, [newTask, sendTodo]);
+
+  var startEdit = useCallback(function (task) {
+    setEditingId(task.id); setEditDraft(task.task); setConfirmDelete("");
+  }, []);
+
+  var saveEdit = useCallback(function (task) {
+    var text = (editDraft || "").trim();
+    setEditingId("");
+    // Nothing to do if it was not actually changed.
+    if (!text || text === task.task) return;
+    sendTodo({ action: "edit", id: task.id, task: text });
+  }, [editDraft, sendTodo]);
+
+  var deleteTask = useCallback(function (task) {
+    setConfirmDelete("");
+    sendTodo({ action: "delete", id: task.id });
+  }, [sendTodo]);
 
   var addSubtask = useCallback(function (parentId) {
     var text = (subtaskDraft || "").trim();
@@ -895,7 +917,12 @@ function TraakDashboard() {
 
   // Top level only; children are rendered under their parent. Open first, then
   // completed, each keeping sheet order.
-  var topLevel = todos.filter(function (t) { return !t.parentId; }).sort(function (a, b) {
+  // A task counts as top level if it has no parent, OR if its parent is gone.
+  // Without the second clause an orphaned subtask would occupy a sheet row while
+  // being invisible here, with no way to reach it from the dashboard.
+  var idsPresent = {};
+  todos.forEach(function (t) { idsPresent[t.id] = true; });
+  var topLevel = todos.filter(function (t) { return !t.parentId || !idsPresent[t.parentId]; }).sort(function (a, b) {
     var aDone = a.status === "Done" ? 1 : 0, bDone = b.status === "Done" ? 1 : 0;
     return aDone - bDone || a.row - b.row;
   });
@@ -927,9 +954,25 @@ function TraakDashboard() {
     },
       marker,
       h("div", { style: { flex: 1, minWidth: 0 } },
-        h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: isChild ? 12.5 : 13, lineHeight: 1.5,
-                            color: done ? COLORS.textFaint : COLORS.text,
-                            textDecoration: done ? "line-through" : "none" } }, task.task),
+        editingId === task.id
+          ? h("input", { type: "text", value: editDraft, autoFocus: true, disabled: todoBusy,
+              onChange: function (e) { setEditDraft(e.target.value); },
+              onBlur: function () { saveEdit(task); },
+              onKeyDown: function (e) {
+                if (e.key === "Enter") saveEdit(task);
+                if (e.key === "Escape") setEditingId("");
+              },
+              style: { width: "100%", background: COLORS.bg, border: "1px solid " + COLORS.accent,
+                       color: COLORS.text, borderRadius: 4, padding: "4px 8px",
+                       fontFamily: "'Inter', sans-serif", fontSize: isChild ? 12.5 : 13, outline: "none" } })
+          // Click the text to edit it. Cheaper than a pencil button on every row,
+          // and the only thing a click on a task label could sensibly mean.
+          : h("div", { onClick: function () { if (!todoBusy) startEdit(task); },
+              title: "Click to edit",
+              style: { fontFamily: "'Inter', sans-serif", fontSize: isChild ? 12.5 : 13, lineHeight: 1.5,
+                       color: done ? COLORS.textFaint : COLORS.text,
+                       textDecoration: done ? "line-through" : "none",
+                       cursor: todoBusy ? "wait" : "text" } }, task.task),
         h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.textFaint, marginTop: 2 } },
           (isAi ? "AI" : "MANUAL") + (task.dateAdded ? " \u00b7 " + task.dateAdded : ""))
       ),
@@ -938,12 +981,32 @@ function TraakDashboard() {
                                  padding: "1px 5px", marginTop: 2, flexShrink: 0 } }, "AI") : null,
       // Only top-level tasks can take subtasks -- one level of nesting.
       isChild ? null : h("button", {
-        onClick: function () { setSubtaskFor(subtaskFor === task.id ? "" : task.id); setSubtaskDraft(""); },
+        onClick: function () { setSubtaskFor(subtaskFor === task.id ? "" : task.id); setSubtaskDraft(""); setConfirmDelete(""); },
         disabled: todoBusy,
         title: "Add a subtask",
         style: { background: "transparent", border: "1px solid " + COLORS.panelBorder, color: COLORS.textMuted,
                  borderRadius: 4, padding: "1px 7px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13,
-                 lineHeight: 1.3, cursor: "pointer", flexShrink: 0, marginTop: 1 } }, "+")
+                 lineHeight: 1.3, cursor: "pointer", flexShrink: 0, marginTop: 1 } }, "+"),
+
+      // Two-step delete rather than a confirm() dialog: the first click turns
+      // the button into the confirmation, naming how many subtasks go with it.
+      h("button", {
+        onClick: function () {
+          if (confirmDelete === task.id) deleteTask(task);
+          else { setConfirmDelete(task.id); setSubtaskFor(""); }
+        },
+        onBlur: function () { if (confirmDelete === task.id) setConfirmDelete(""); },
+        disabled: todoBusy,
+        title: kids.length ? "Delete this and its " + kids.length + " subtask(s)" : "Delete",
+        style: { background: confirmDelete === task.id ? COLORS.red : "transparent",
+                 border: "1px solid " + (confirmDelete === task.id ? COLORS.red : COLORS.panelBorder),
+                 color: confirmDelete === task.id ? COLORS.bg : COLORS.textFaint,
+                 borderRadius: 4, padding: "1px 7px", fontFamily: "'IBM Plex Mono', monospace",
+                 fontSize: confirmDelete === task.id ? 10 : 13, lineHeight: 1.3, cursor: "pointer",
+                 flexShrink: 0, marginTop: 1, whiteSpace: "nowrap" } },
+        confirmDelete === task.id
+          ? (kids.length ? "DELETE +" + kids.length : "DELETE?")
+          : "\u00d7")
     );
   }
 
