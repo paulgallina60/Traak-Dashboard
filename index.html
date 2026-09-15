@@ -152,6 +152,32 @@ function toNumber(v) {
   return isNaN(n) ? 0 : n;
 }
 
+// Column lookup by header name, rather than by fixed position.
+//
+// The Daily Tracker tab gains columns over time -- a TikTok column was inserted
+// at M, shifting everything from "Total Ad Spend" onward one place right. Fixed
+// indices do not error when that happens, they silently start reading the
+// neighbouring column, which is how PROFIT came to display Total Expenses.
+// Same find_col_index discipline used by the Python repos that write this sheet.
+function findHeaderRow(rows, requiredNames) {
+  for (var i = 0; i < Math.min(rows.length, 8); i++) {
+    var allFound = true;
+    for (var j = 0; j < requiredNames.length; j++) {
+      if (colIndex(rows[i], requiredNames[j]) === -1) { allFound = false; break; }
+    }
+    if (allFound) return i;
+  }
+  return -1;
+}
+
+function colIndex(headerRow, name) {
+  var target = String(name).trim().toLowerCase();
+  for (var i = 0; i < (headerRow || []).length; i++) {
+    if (String(headerRow[i] || "").trim().toLowerCase() === target) return i;
+  }
+  return -1;
+}
+
 function getPreviousWeekMonday() {
   var d = new Date();
   var day = d.getDay();
@@ -162,18 +188,42 @@ function getPreviousWeekMonday() {
 
 function parseDailyTracker(rows) {
   if (!rows) return null;
+
+  var headerRowIndex = findHeaderRow(rows, ["date", "Sales", "PROFIT"]);
+  if (headerRowIndex === -1) {
+    console.error("Daily Tracker: no header row containing date / Sales / PROFIT was found.");
+    return null;
+  }
+  var headers = rows[headerRowIndex];
+
+  var COLS = { sales: "Sales", orders: "Orders", sessions: "Sessions",
+               meta: "Meta", google: "Google", profit: "PROFIT" };
+  var idx = {};
+  Object.keys(COLS).forEach(function (key) {
+    idx[key] = colIndex(headers, COLS[key]);
+    if (idx[key] === -1) {
+      // Blank is honest; reading whatever sits at a guessed position is not.
+      console.warn("Daily Tracker: no column headed '" + COLS[key] + "' -- it will show as blank.");
+    }
+  });
+
+  function value(row, key) {
+    return idx[key] === -1 ? null : toNumber(row[idx[key]]);
+  }
+
   var dailyData = {}, availableDates = [];
-  for (var i = 2; i < rows.length; i++) {
-     var r = rows[i];
-     var d = extractDate(r[0]);
-     if(!d) continue; 
-     var sales = toNumber(r[1]), orders = toNumber(r[3]), profit = toNumber(r[19]);
-     dailyData[d] = {
-       sales: sales, orders: orders, profit: profit,
-       sessions: toNumber(r[5]), meta: toNumber(r[10]), google: toNumber(r[11]),
-       aov: orders ? sales / orders : 0, profitPct: sales ? (profit / sales) * 100 : 0
-     };
-     if (availableDates.indexOf(d) === -1) availableDates.push(d);
+  for (var i = headerRowIndex + 1; i < rows.length; i++) {
+    var r = rows[i];
+    var d = extractDate(r[0]);
+    if (!d) continue;
+    var sales = value(r, "sales"), orders = value(r, "orders"), profit = value(r, "profit");
+    dailyData[d] = {
+      sales: sales, orders: orders, profit: profit,
+      sessions: value(r, "sessions"), meta: value(r, "meta"), google: value(r, "google"),
+      aov: orders ? sales / orders : 0,
+      profitPct: (sales && profit !== null) ? (profit / sales) * 100 : 0
+    };
+    if (availableDates.indexOf(d) === -1) availableDates.push(d);
   }
   return { byDate: dailyData, dates: availableDates };
 }
