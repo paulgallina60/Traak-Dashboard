@@ -2,11 +2,20 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
+<!-- Without this a phone renders the page at ~980px and scales it down, which is
+     why the dashboard looked like a shrunken desktop rather than a mobile layout. -->
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Traak — Executive Dashboard</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" />
 <style>
-  html, body { margin: 0; padding: 0; background: #111417; }
+  html, body { margin: 0; padding: 0; background: #111417; -webkit-text-size-adjust: 100%; }
   * { box-sizing: border-box; }
+  /* iOS zooms the whole page when a text field under 16px takes focus. Every
+     style in this file is inline and inline styles win on specificity, so
+     !important is the only way to reach these from a stylesheet. */
+  @media (max-width: 760px) {
+    input, select, textarea { font-size: 16px !important; }
+  }
 </style>
 </head>
 <body>
@@ -500,14 +509,40 @@ function statusColor(value, thresholds, invert) {
   return COLORS.red;
 }
 
+// --- Narrow-screen layout ------------------------------------------------
+// Styles here are inline, so CSS media queries cannot reach them. Instead one
+// media query is watched in JS and the handful of layouts that do not reflow
+// on their own read `narrow`. 760px covers phones in both orientations and
+// small tablets; at anything wider the desktop layout is untouched.
+var NARROW_QUERY = "(max-width: 760px)";
+var narrowMql = window.matchMedia ? window.matchMedia(NARROW_QUERY) : null;
+
+function useNarrow() {
+  var pair = useState(narrowMql ? narrowMql.matches : false);
+  var narrow = pair[0], setNarrow = pair[1];
+  useEffect(function () {
+    if (!narrowMql) return undefined;
+    function onChange() { setNarrow(narrowMql.matches); }
+    onChange();   // width may have changed between first render and mount
+    if (narrowMql.addEventListener) {
+      narrowMql.addEventListener("change", onChange);
+      return function () { narrowMql.removeEventListener("change", onChange); };
+    }
+    narrowMql.addListener(onChange);   // Safari < 14
+    return function () { narrowMql.removeListener(onChange); };
+  }, []);
+  return narrow;
+}
+
 function SplitCard(props) {
+  var narrow = useNarrow();
   var children = [
     h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: COLORS.textMuted, marginBottom: 6 } }, props.label),
-    h("div", { style: { fontFamily: "'Oswald', sans-serif", fontWeight: 600, fontSize: props.big ? 40 : 26, color: COLORS.text, lineHeight: 1 } }, props.value),
+    h("div", { style: { fontFamily: "'Oswald', sans-serif", fontWeight: 600, fontSize: props.big ? (narrow ? 30 : 40) : (narrow ? 22 : 26), color: COLORS.text, lineHeight: 1 } }, props.value),
   ];
   if (props.sub) { children.push(h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: COLORS.textMuted, marginTop: 6 } }, props.sub)); }
   return h("div", {
-    style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderLeft: "4px solid " + (props.color || COLORS.textFaint), borderRadius: 6, padding: props.big ? "22px 24px" : "16px 18px", minWidth: 0 }
+    style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderLeft: "4px solid " + (props.color || COLORS.textFaint), borderRadius: 6, padding: narrow ? (props.big ? "16px 16px" : "13px 14px") : (props.big ? "22px 24px" : "16px 18px"), minWidth: 0 }
   }, children);
 }
 
@@ -541,6 +576,7 @@ function storeTab(key) {
 }
 
 function TabBar(props) {
+  var narrow = useNarrow();
   return h("div", {
     style: { display: "flex", gap: 4, flexWrap: "wrap", borderBottom: "1px solid " + COLORS.panelBorder, marginTop: 22 }
   }, TABS.map(function (tab) {
@@ -554,10 +590,15 @@ function TabBar(props) {
         borderBottom: "2px solid " + (active ? COLORS.accent : "transparent"),
         color: active ? COLORS.accent : COLORS.textMuted,
         fontFamily: "'Oswald', sans-serif",
-        fontSize: 14,
-        letterSpacing: "0.1em",
+        fontSize: narrow ? 11 : 14,
+        letterSpacing: narrow ? "0.03em" : "0.1em",
         textTransform: "uppercase",
-        padding: "10px 16px",
+        padding: narrow ? "12px 6px" : "10px 16px",
+        flex: narrow ? "1 1 0" : "0 0 auto",
+        minWidth: 0,
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
         marginBottom: -1,
         cursor: "pointer",
         transition: "color 120ms ease"
@@ -567,9 +608,10 @@ function TabBar(props) {
 }
 
 function MiniStat(props) {
+  var narrow = useNarrow();
   return h("div", null,
     h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: COLORS.textMuted } }, props.label),
-    h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, color: props.color || COLORS.text, marginTop: 3 } }, props.value)
+    h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: narrow ? 16 : 18, fontWeight: 600, color: props.color || COLORS.text, marginTop: 3 } }, props.value)
   );
 }
 
@@ -610,6 +652,8 @@ function TraakDashboard() {
   var [editDraft, setEditDraft] = useState("");
   // Delete needs a second click to confirm -- no dialog, just a changed button.
   var [confirmDelete, setConfirmDelete] = useState("");
+
+  var narrow = useNarrow();
 
   var loadTodos = useCallback(function () {
     if (!TODO_WEB_APP_URL) return;
@@ -730,10 +774,10 @@ function TraakDashboard() {
   var monthlyRec = data.monthlyRecommendations;
   var weeklyAdRec = data.weeklyAdRecommendations;
 
-  var headerRow = h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 } },
+  var headerRow = h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: narrow ? "flex-start" : "flex-end", flexWrap: "wrap", gap: narrow ? 8 : 12 } },
     h("div", null,
       h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: "0.15em", color: COLORS.accent, textTransform: "uppercase" } }, "Traak Running"),
-      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 30, fontWeight: 600 } }, "Executive Dashboard")
+      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: narrow ? 23 : 30, fontWeight: 600 } }, "Executive Dashboard")
     ),
     h("div", { style: { display: "flex", gap: 10, alignItems: "center" } },
       h("span", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.textFaint } }, lastRefreshed ? "Updated " + lastRefreshed.toLocaleTimeString() : ""),
@@ -741,7 +785,7 @@ function TraakDashboard() {
     )
   );
 
-  var dailyControls = h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 26, marginBottom: 14 } },
+  var dailyControls = h("div", { style: { display: "flex", flexDirection: narrow ? "column" : "row", justifyContent: "space-between", alignItems: narrow ? "stretch" : "baseline", gap: narrow ? 8 : 0, marginTop: narrow ? 18 : 26, marginBottom: 14 } },
       h(SectionHeading, { style: { margin: 0, padding: 0, border: "none" } }, "Daily Ops Report"),
       data.dailyTracker && h("select", {
           value: selectedDate, onChange: function(e) { setSelectedDate(e.target.value); },
@@ -749,7 +793,7 @@ function TraakDashboard() {
       }, data.dailyTracker.dates.map(function(d) { return h("option", { key: d, value: d }, d); }))
   );
 
-  var dailyGrid = dayData ? h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14 } },
+  var dailyGrid = dayData ? h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fit, minmax(160px, 1fr))", gap: narrow ? 10 : 14 } },
     h(SplitCard, { big: true, label: "Sales", value: fmtCurrency(dayData.sales), color: COLORS.lane }),
     h(SplitCard, { big: true, label: "Profit", value: fmtCurrency(dayData.profit), sub: fmtPct(dayData.profitPct) + " margin", color: statusColor(dayData.profitPct, { good: 15, warn: 8 }) }),
     h(SplitCard, { big: true, label: "Orders", value: fmtNum(dayData.orders), sub: "AOV " + fmtCurrency(dayData.aov), color: COLORS.lane }),
@@ -758,14 +802,14 @@ function TraakDashboard() {
     h(SplitCard, { big: true, label: "Google Spend", value: fmtCurrency(dayData.google), color: COLORS.lane })
   ) : h(EmptyNote, { text: errors.dailyTracker || "Loading daily data..." });
 
-  var weeklyControls = h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 40, marginBottom: 14, borderBottom: "1px solid " + COLORS.panelBorder, paddingBottom: 8 } },
+  var weeklyControls = h("div", { style: { display: "flex", flexDirection: narrow ? "column" : "row", justifyContent: "space-between", alignItems: narrow ? "flex-start" : "baseline", gap: narrow ? 8 : 0, marginTop: narrow ? 30 : 40, marginBottom: 14, borderBottom: "1px solid " + COLORS.panelBorder, paddingBottom: 8 } },
       h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: "0.1em", textTransform: "uppercase", color: COLORS.accent } }, "Weekly Marketing & Retention"),
       h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: COLORS.textMuted } },
           "Week Starting: ", h("input", { type: "date", value: selectedWeek, onChange: function(e) { setSelectedWeek(e.target.value); }, style: { background: COLORS.panel, color: COLORS.text, border: "1px solid " + COLORS.panelBorder, padding: "2px 6px", borderRadius: 4, colorScheme: "dark" } })
       )
   );
 
-  var trafficGrid = h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, marginBottom: 14 } },
+  var trafficGrid = h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fit, minmax(200px, 1fr))", gap: narrow ? 10 : 14, marginBottom: 14 } },
     h(SplitCard, { label: "Sessions", value: weekCf ? fmtNum(weekCf.sessions) : (errors.conversionFunnel || "…"), color: COLORS.lane }),
     h(SplitCard, { label: "Sessions → PDP", value: weekCf ? fmtPct(weekCf.sessionsToPdp) : "…", color: statusColor(weekCf && weekCf.sessionsToPdp, { good: 100, warn: 80 }) }),
     h(SplitCard, { label: "PDP → ATC", value: weekCf ? fmtPct(weekCf.pdpToAtc) : "…", sub: "Primary health metric", color: statusColor(weekCf && weekCf.pdpToAtc, { good: 10, warn: 6 }) }),
@@ -774,7 +818,7 @@ function TraakDashboard() {
   );
 
   function adPlatformCard(title, platformData, errKey) {
-    var body = platformData ? h("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 } },
+    var body = platformData ? h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 12 } },
       h(MiniStat, { label: "Spend", value: fmtCurrency(platformData.spend) }),
       h(MiniStat, { label: "Revenue", value: fmtCurrency(platformData.convValue) }),
       h(MiniStat, { label: "ROAS", value: fmtRoas(platformData.roas), color: statusColor(platformData.roas, { good: 2.5, warn: 2 }) }),
@@ -783,26 +827,26 @@ function TraakDashboard() {
       h(MiniStat, { label: "Clicks", value: fmtNum(platformData.clicks) }),
       h(MiniStat, { label: "CTR", value: fmtPct(platformData.ctr), color: statusColor(platformData.ctr, { good: 1, warn: 0.5 }) })
     ) : h(EmptyNote, { text: errors[errKey] || "No data for this week" });
-    return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+    return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } },
       h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, title), body
     );
   }
 
-  var adsRow = h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 } },
+  var adsRow = h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "1fr" : "1fr 1fr", gap: narrow ? 10 : 14, marginBottom: 14 } },
     adPlatformCard("META ADS", weekMeta, "metaAds"), adPlatformCard("GOOGLE ADS", weekGoogle, "googleAds")
   );
 
   function klaviyoCard(title, sectionData) {
-    var body = sectionData ? h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 } },
+    var body = sectionData ? h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, 1fr)" : "1fr 1fr 1fr", gap: 12 } },
       h(MiniStat, { label: "Open Rate", value: fmtPct(sectionData.openRate), color: statusColor(sectionData.openRate, { good: 25, warn: 10 }) }),
       h(MiniStat, { label: "Click Rate", value: fmtPct(sectionData.clickRate) }), h(MiniStat, { label: "Revenue", value: fmtCurrency(sectionData.revenue) })
     ) : h(EmptyNote, { text: errors.klaviyo || "No data for this week" });
-    return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+    return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } },
       h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, title), body
     );
   }
 
-  var klaviyoRow = h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 } },
+  var klaviyoRow = h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "1fr" : "1fr 1fr", gap: narrow ? 10 : 14 } },
     klaviyoCard("CAMPAIGNS (Klaviyo)", weekKl && weekKl.campaigns), klaviyoCard("FLOWS (Klaviyo)", weekKl && weekKl.flows)
   );
 
@@ -814,23 +858,23 @@ function TraakDashboard() {
         h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 22, color: COLORS.red, marginBottom: 10 } }, stock.urgentCount + " product" + (stock.urgentCount === 1 ? "" : "s") + " need reordering"),
         h("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
           stock.urgent.map(function (p, i) {
-            return h("div", { key: i, style: { display: "flex", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, borderBottom: i < stock.urgent.length - 1 ? "1px solid " + COLORS.panelBorder : "none", paddingBottom: 6 } }, 
-            h("span", null, p.name), h("span", { style: { color: COLORS.textMuted } }, p.qty + " on hand"));
+            return h("div", { key: i, style: { display: "flex", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, gap: 10, borderBottom: i < stock.urgent.length - 1 ? "1px solid " + COLORS.panelBorder : "none", paddingBottom: 6 } }, 
+            h("span", { style: { minWidth: 0, overflowWrap: "anywhere" } }, p.name), h("span", { style: { color: COLORS.textMuted, flexShrink: 0, whiteSpace: "nowrap" } }, p.qty + " on hand"));
           })
         )
       );
     }
   } else { inventoryBody = h(EmptyNote, { text: errors.stockForecast || "Loading inventory..." }); }
 
-  var inventorySection = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } }, inventoryBody);
+  var inventorySection = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } }, inventoryBody);
 
   // --- Monthly Analytics section ---
-  var monthlyControls = h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 40, marginBottom: 14, borderBottom: "1px solid " + COLORS.panelBorder, paddingBottom: 8 } },
+  var monthlyControls = h("div", { style: { display: "flex", flexDirection: narrow ? "column" : "row", justifyContent: "space-between", alignItems: narrow ? "flex-start" : "baseline", gap: narrow ? 8 : 0, marginTop: narrow ? 30 : 40, marginBottom: 14, borderBottom: "1px solid " + COLORS.panelBorder, paddingBottom: 8 } },
       h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: "0.1em", textTransform: "uppercase", color: COLORS.accent } }, "Monthly Analytics"),
       h("input", { type: "month", value: selectedMonth, onChange: function(e) { setSelectedMonth(e.target.value); }, style: { background: COLORS.panel, color: COLORS.text, border: "1px solid " + COLORS.panelBorder, padding: "2px 6px", borderRadius: 4, colorScheme: "dark", fontFamily: "'IBM Plex Mono', monospace" } })
   );
 
-  var monthlyGrid = h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14, marginBottom: 14 } },
+  var monthlyGrid = h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fit, minmax(180px, 1fr))", gap: narrow ? 10 : 14, marginBottom: 14 } },
     h(SplitCard, { big: true, label: "Sales (month)", value: monthDaily ? fmtCurrency(monthDaily.sales) : "…", color: COLORS.lane }),
     h(SplitCard, { big: true, label: "Profit (month)", value: monthDaily ? fmtCurrency(monthDaily.profit) : "…", sub: monthDaily ? fmtPct(monthDaily.profitPct) + " margin" : null, color: statusColor(monthDaily && monthDaily.profitPct, { good: 15, warn: 8 }) }),
     h(SplitCard, { big: true, label: "Orders (month)", value: monthDaily ? fmtNum(monthDaily.orders) : "…", sub: monthDaily ? "AOV " + fmtCurrency(monthDaily.aov) : null, color: COLORS.lane })
@@ -838,7 +882,7 @@ function TraakDashboard() {
 
   // Monthly funnel -- same five metrics and same thresholds as the weekly row,
   // so a month and a week can be read against each other without translation.
-  var monthlyFunnelGrid = h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, marginBottom: 14 } },
+  var monthlyFunnelGrid = h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fit, minmax(200px, 1fr))", gap: narrow ? 10 : 14, marginBottom: 14 } },
     h(SplitCard, { label: "Sessions (month)", value: monthFunnel ? fmtNum(monthFunnel.sessions) : "…", color: COLORS.lane }),
     h(SplitCard, { label: "Sessions \u2192 PDP", value: monthFunnel ? fmtPct(monthFunnel.sessionsToPdp) : "…",
       sub: monthFunnel ? fmtNum(monthFunnel.pdpViews) + " PDP views" : null,
@@ -854,25 +898,25 @@ function TraakDashboard() {
       color: statusColor(monthFunnel && monthFunnel.checkoutToTransaction, { good: 50, warn: 30 }) })
   );
 
-  var monthlyAdsRow = h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 } },
+  var monthlyAdsRow = h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "1fr" : "1fr 1fr", gap: narrow ? 10 : 14, marginBottom: 14 } },
     (function () {
-      var body = monthMeta ? h("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 } },
+      var body = monthMeta ? h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 12 } },
         h(MiniStat, { label: "Spend", value: fmtCurrency(monthMeta.spend) }),
         h(MiniStat, { label: "Revenue", value: fmtCurrency(monthMeta.convValue) }),
         h(MiniStat, { label: "ROAS", value: fmtRoas(monthMeta.roas), color: statusColor(monthMeta.roas, { good: 2.5, warn: 2 }) }),
         h(MiniStat, { label: "CPA", value: fmtCurrency(monthMeta.cpa), color: statusColor(monthMeta.cpa, { good: 33, warn: 40 }, true) })
       ) : h(EmptyNote, { text: "No data for this month" });
-      return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+      return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } },
         h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, "META ADS (month)"), body);
     })(),
     (function () {
-      var body = monthGoogle ? h("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 } },
+      var body = monthGoogle ? h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 12 } },
         h(MiniStat, { label: "Spend", value: fmtCurrency(monthGoogle.spend) }),
         h(MiniStat, { label: "Revenue", value: fmtCurrency(monthGoogle.convValue) }),
         h(MiniStat, { label: "ROAS", value: fmtRoas(monthGoogle.roas), color: statusColor(monthGoogle.roas, { good: 2.5, warn: 2 }) }),
         h(MiniStat, { label: "CPA", value: fmtCurrency(monthGoogle.cpa), color: statusColor(monthGoogle.cpa, { good: 33, warn: 40 }, true) })
       ) : h(EmptyNote, { text: "No data for this month" });
-      return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+      return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } },
         h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, "GOOGLE ADS (month)"), body);
     })()
   );
@@ -887,18 +931,18 @@ function TraakDashboard() {
   // --- AI Recommendations section (monthly + weekly ad-only) ---
   var recommendationsHeading = h(SectionHeading, null, "AI Recommendations");
 
-  var monthlyRecCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18, marginBottom: 14 } },
+  var monthlyRecCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18, marginBottom: 14 } },
     h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } },
       h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14 } }, "Monthly Priorities" + (monthlyRec ? " — " + monthlyRec.period : "")),
       h("button", { onClick: refresh, disabled: loading, style: { background: "transparent", border: "1px solid " + COLORS.panelBorder, color: COLORS.text, borderRadius: 5, padding: "5px 12px", fontFamily: "'Inter', sans-serif", fontSize: 11, cursor: "pointer" } }, "Refresh")
     ),
-    monthlyRec ? h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" } }, monthlyRec.text)
+    monthlyRec ? h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap", overflowWrap: "anywhere" } }, monthlyRec.text)
                : h(EmptyNote, { text: errors.monthlyRecommendations || "No monthly report generated yet" })
   );
 
-  var weeklyAdRecCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+  var weeklyAdRecCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } },
     h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 10 } }, "Weekly Ad Priorities" + (weeklyAdRec ? " — " + weeklyAdRec.period : "")),
-    weeklyAdRec ? h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" } }, weeklyAdRec.text)
+    weeklyAdRec ? h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap", overflowWrap: "anywhere" } }, weeklyAdRec.text)
                 : h(EmptyNote, { text: errors.weeklyAdRecommendations || "No weekly ad report generated yet" })
   );
 
@@ -942,7 +986,7 @@ function TraakDashboard() {
           task.doneChildren + "/" + task.totalChildren)
       : h("input", { type: "checkbox", checked: done, disabled: todoBusy,
           onChange: function () { toggleTodo(task); },
-          style: { marginTop: 3, width: 15, height: 15, accentColor: COLORS.accent,
+          style: { marginTop: 3, width: narrow ? 20 : 15, height: narrow ? 20 : 15, accentColor: COLORS.accent,
                    cursor: todoBusy ? "wait" : "pointer", flexShrink: 0 } });
 
     return h("div", {
@@ -970,6 +1014,7 @@ function TraakDashboard() {
           : h("div", { onClick: function () { if (!todoBusy) startEdit(task); },
               title: "Click to edit",
               style: { fontFamily: "'Inter', sans-serif", fontSize: isChild ? 12.5 : 13, lineHeight: 1.5,
+                       overflowWrap: "anywhere",
                        color: done ? COLORS.textFaint : COLORS.text,
                        textDecoration: done ? "line-through" : "none",
                        cursor: todoBusy ? "wait" : "text" } }, task.task),
@@ -985,7 +1030,7 @@ function TraakDashboard() {
         disabled: todoBusy,
         title: "Add a subtask",
         style: { background: "transparent", border: "1px solid " + COLORS.panelBorder, color: COLORS.textMuted,
-                 borderRadius: 4, padding: "1px 7px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13,
+                 borderRadius: 4, padding: narrow ? "5px 12px" : "1px 7px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13,
                  lineHeight: 1.3, cursor: "pointer", flexShrink: 0, marginTop: 1 } }, "+"),
 
       // Two-step delete rather than a confirm() dialog: the first click turns
@@ -1001,7 +1046,7 @@ function TraakDashboard() {
         style: { background: confirmDelete === task.id ? COLORS.red : "transparent",
                  border: "1px solid " + (confirmDelete === task.id ? COLORS.red : COLORS.panelBorder),
                  color: confirmDelete === task.id ? COLORS.bg : COLORS.textFaint,
-                 borderRadius: 4, padding: "1px 7px", fontFamily: "'IBM Plex Mono', monospace",
+                 borderRadius: 4, padding: narrow ? "5px 10px" : "1px 7px", fontFamily: "'IBM Plex Mono', monospace",
                  fontSize: confirmDelete === task.id ? 10 : 13, lineHeight: 1.3, cursor: "pointer",
                  flexShrink: 0, marginTop: 1, whiteSpace: "nowrap" } },
         confirmDelete === task.id
@@ -1024,7 +1069,7 @@ function TraakDashboard() {
     }).forEach(function (child) { todoRows.push(taskLine(child, true)); });
 
     if (subtaskFor === task.id) {
-      todoRows.push(h("div", { key: task.id + "-add", style: { display: "flex", gap: 8, padding: "4px 0 10px 33px" } },
+      todoRows.push(h("div", { key: task.id + "-add", style: { display: "flex", gap: 8, flexWrap: "wrap", padding: narrow ? "4px 0 10px 26px" : "4px 0 10px 33px" } },
         h("input", { type: "text", value: subtaskDraft, placeholder: "Subtask\u2026", autoFocus: true,
           disabled: todoBusy,
           onChange: function (e) { setSubtaskDraft(e.target.value); },
@@ -1058,7 +1103,7 @@ function TraakDashboard() {
     todoBody = h("div", null, todoRows);
   }
 
-  var todoCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: 18 } },
+  var todoCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } },
     h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } },
       h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14 } },
         "Open Items" + (todos.length ? " — " + openCount + " of " + todos.length : "")),
@@ -1067,7 +1112,7 @@ function TraakDashboard() {
         todoBusy ? "Working…" : "Refresh")
     ),
     todoBody,
-    h("div", { style: { display: "flex", gap: 8, marginTop: 14 } },
+    h("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 } },
       h("input", {
         type: "text", value: newTask, placeholder: "Add a task…", disabled: todoBusy || !TODO_WEB_APP_URL,
         onChange: function (e) { setNewTask(e.target.value); },
@@ -1099,7 +1144,7 @@ function TraakDashboard() {
     ];
   }
 
-  return h("div", { style: { background: COLORS.bg, minHeight: "100vh", color: COLORS.text, fontFamily: "'Inter', sans-serif", padding: "28px 32px 60px" } },
+  return h("div", { style: { background: COLORS.bg, minHeight: "100vh", color: COLORS.text, fontFamily: "'Inter', sans-serif", padding: narrow ? "16px 14px 48px" : "28px 32px 60px" } },
     headerRow,
     h(TabBar, { active: activeTab, onSelect: selectTab, openTodos: openCount }),
     h("div", { key: activeTab }, tabContent)
