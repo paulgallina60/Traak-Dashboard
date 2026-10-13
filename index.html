@@ -4,11 +4,30 @@
 <meta charset="UTF-8" />
 <!-- Without this a phone renders the page at ~980px and scales it down, which is
      why the dashboard looked like a shrunken desktop rather than a mobile layout. -->
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Traak — Executive Dashboard</title>
+
+<!-- Installable to the home screen. Two sets of tags because iOS largely
+     ignores the manifest: Android/Chrome read manifest.json, iOS reads the
+     apple-* tags. "standalone" is the line that drops the browser chrome. -->
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#111417" />
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Traak" />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" />
 <style>
   html, body { margin: 0; padding: 0; background: #111417; -webkit-text-size-adjust: 100%; }
+  body {
+    padding: 0;
+    padding-top: env(safe-area-inset-top);
+    padding-right: env(safe-area-inset-right);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+  }
   * { box-sizing: border-box; }
   /* iOS zooms the whole page when a text field under 16px takes focus. Every
      style in this file is inline and inline styles win on specificity, so
