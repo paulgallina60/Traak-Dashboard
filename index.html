@@ -560,21 +560,31 @@ function aggregateMonthlyAds(weeksObj, monthPrefix) {
   };
 }
 
-function aggregateMonthlyDaily(byDate, monthPrefix) {
+function aggregateMonthlyDaily(byDate, monthPrefix, maxDay) {
   if (!byDate) return null;
-  var sales = 0, orders = 0, profit = 0, matchedAny = false;
+  var sales = 0, orders = 0, profit = 0, sessions = 0, matchedAny = false;
+  var days = 0, lastDay = 0;
   var cod = 0, opex = 0, adSpend = 0, haveCosts = false;
   Object.keys(byDate).forEach(function (dateKey) {
     if (dateKey.indexOf(monthPrefix) !== 0) return;
-    matchedAny = true;
+    var dayNum = parseInt(dateKey.slice(8, 10), 10);
+    // maxDay trims a month to its first N days, so a part-month can be set
+    // against the same stretch of the month before. Without it every
+    // mid-month comparison shows a collapse that is only a shorter window.
+    if (maxDay && dayNum > maxDay) return;
+    matchedAny = true; days++;
+    if (dayNum > lastDay) lastDay = dayNum;
     var day = byDate[dateKey];
     sales += day.sales; orders += day.orders; profit += day.profit;
+    sessions += day.sessions || 0;
     if (day.cod !== null && day.cod !== undefined) { cod += day.cod; haveCosts = true; }
     opex += day.opex || 0;
     adSpend += day.adSpend || 0;
   });
   if (!matchedAny) return null;
   return { sales: sales, orders: orders, profit: profit,
+           sessions: sessions, days: days, lastDay: lastDay,
+           cvr: sessions ? orders / sessions : 0,
            aov: orders ? sales / orders : 0, profitPct: sales ? (profit / sales) * 100 : 0,
            // Sales = COD + OPEX + Total Ad Spend + PROFIT, because the sheet
            // derives Total Opex = OPEX+COGS+Shipping+Fees, Total Expenses =
@@ -808,6 +818,41 @@ function SplitCard(props) {
   }, children);
 }
 
+// Gain/green against loss/red separate well for normal vision but sit in the
+// colour-blind warn band, so every bar carries a signed value -- the secondary
+// encoding that makes the pair legal, and the thing you want to read anyway.
+var BRIDGE_GAIN = "#199E70", BRIDGE_LOSS = "#E66767";
+
+function ChangeBridge(props) {
+  var narrow = useNarrow();
+  var drivers = props.drivers;
+  var max = 0;
+  drivers.forEach(function (d) { max = Math.max(max, Math.abs(d.amount)); });
+
+  return h("div", null, drivers.map(function (d) {
+    var frac = max ? (Math.abs(d.amount) / max) * 100 : 0;
+    var gain = d.amount >= 0;
+    var bar = h("div", { style: { height: narrow ? 13 : 15, width: frac + "%",
+        background: gain ? BRIDGE_GAIN : BRIDGE_LOSS,
+        borderRadius: gain ? "0 3px 3px 0" : "3px 0 0 3px" } });
+    return h("div", { key: d.label, style: { display: "flex", alignItems: "center",
+        gap: narrow ? 8 : 12, marginBottom: 7 } },
+      h("div", { style: { width: narrow ? 92 : 152, flexShrink: 0,
+          fontFamily: "'Inter', sans-serif", fontSize: narrow ? 11.5 : 12.5,
+          color: COLORS.textMuted } }, d.label),
+      h("div", { style: { flex: 1, display: "flex", alignItems: "center", minWidth: 0 } },
+        h("div", { style: { flex: 1, display: "flex", justifyContent: "flex-end" } },
+          gain ? null : bar),
+        h("div", { style: { width: 1, height: narrow ? 17 : 19, flexShrink: 0,
+            background: COLORS.textFaint } }),
+        h("div", { style: { flex: 1, display: "flex" } }, gain ? bar : null)),
+      h("div", { style: { width: narrow ? 74 : 92, flexShrink: 0, textAlign: "right",
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: narrow ? 11.5 : 12.5,
+          color: gain ? BRIDGE_GAIN : BRIDGE_LOSS } },
+        (gain ? "+" : "\u2212") + fmtCurrency(Math.abs(d.amount))));
+  }));
+}
+
 function SectionHeading(props) {
   return h("div", {
     style: Object.assign({ fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: "0.1em", textTransform: "uppercase", color: COLORS.accent, borderBottom: "1px solid " + COLORS.panelBorder, paddingBottom: 8, marginBottom: 14, marginTop: 30 }, props.style || {})
@@ -878,6 +923,35 @@ function MiniStat(props) {
 }
 
 function EmptyNote(props) { return h("div", { style: { color: COLORS.textFaint, fontFamily: "'Inter', sans-serif", fontSize: 13 } }, props.text); }
+
+function previousMonthPrefix(prefix) {
+  var p = String(prefix || "").split("-");
+  var y = parseInt(p[0], 10), m = parseInt(p[1], 10) - 1;
+  if (!(y > 0) || !(m >= 0)) return "";
+  if (m < 1) { m = 12; y -= 1; }
+  return y + "-" + (m < 10 ? "0" + m : String(m));
+}
+
+// Revenue is Sessions x Conversion rate x AOV, so a revenue change splits into
+// exactly one term per lever. This is the chained form: each term holds the
+// levers before it at their NEW value and the ones after it at their OLD
+// value. That is what makes the three terms sum to the revenue change exactly
+// rather than approximately -- the cross-effects land somewhere specific
+// instead of being dropped. The ordering decides which lever gets credited
+// with the overlap, and traffic goes first because it is the lever you reach
+// for first; the total is the same whichever order you choose.
+function profitBridge(prev, curr) {
+  var s0 = prev.sessions, c0 = prev.cvr, a0 = prev.aov;
+  var s1 = curr.sessions, c1 = curr.cvr, a1 = curr.aov;
+  return [
+    { label: "Traffic",             amount: (s1 - s0) * c0 * a0 },
+    { label: "Conversion rate",     amount: s1 * (c1 - c0) * a0 },
+    { label: "Average order value", amount: s1 * c1 * (a1 - a0) },
+    { label: "Cost of delivery",    amount: -((curr.cod || 0) - (prev.cod || 0)) },
+    { label: "Overheads",           amount: -((curr.opex || 0) - (prev.opex || 0)) },
+    { label: "Marketing spend",     amount: -((curr.adSpend || 0) - (prev.adSpend || 0)) }
+  ];
+}
 
 function monthName(prefix) {
   var parts = String(prefix || "").split("-");
@@ -1576,6 +1650,61 @@ function TraakDashboard() {
     );
   }
 
+  // --- What changed since last month ---------------------------------------
+  var prevPrefix = previousMonthPrefix(selectedMonth);
+  // Trimmed to the same elapsed days as this month, so a part-month is not
+  // measured against a whole one.
+  var prevMonthDaily = (data.dailyTracker && monthDaily)
+    ? aggregateMonthlyDaily(data.dailyTracker.byDate, prevPrefix, monthDaily.lastDay)
+    : null;
+
+  var bridgeBody;
+  if (!monthDaily) {
+    bridgeBody = h(EmptyNote, { text: errors.dailyTracker || "No daily rows for this month yet" });
+  } else if (!prevMonthDaily || prevMonthDaily.sales <= 0
+             || !prevMonthDaily.sessions || !prevMonthDaily.orders) {
+    bridgeBody = h(EmptyNote, { text: "Nothing comparable in " + monthName(prevPrefix)
+      + " to measure this month against." });
+  } else {
+    var drivers = profitBridge(prevMonthDaily, monthDaily);
+    var explained = 0;
+    drivers.forEach(function (d) { explained += d.amount; });
+    var actualDelta = monthDaily.profit - prevMonthDaily.profit;
+    var residual = actualDelta - explained;
+    // The six drivers reconstruct the profit change exactly, PROVIDED the
+    // PROFIT column equals sales minus the cost columns. When it does not --
+    // a hand-edited cell -- the gap is shown rather than absorbed.
+    var reconciles = Math.abs(residual) <= Math.max(1, Math.abs(actualDelta) * 0.005);
+    var better = actualDelta >= 0;
+
+    bridgeBody = h("div", null,
+      h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: narrow ? 13 : 14.5,
+          lineHeight: 1.5, marginBottom: 14 } },
+        h("span", { style: { color: COLORS.text, fontWeight: 600 } },
+          "Profit is " + fmtCurrency(Math.abs(actualDelta)) + (better ? " better" : " worse")
+          + " than " + monthName(prevPrefix) + "."),
+        h("span", { style: { color: COLORS.textMuted } },
+          " Each line below is what that lever alone added or cost you.")),
+      h(ChangeBridge, { drivers: drivers }),
+      h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 11,
+          color: reconciles ? COLORS.textFaint : COLORS.orange, marginTop: 12, lineHeight: 1.5 } },
+        reconciles
+          ? ("Measured over the first " + monthDaily.lastDay + " days of each month \u2014 "
+             + monthDaily.days + " days of data this month against " + prevMonthDaily.days
+             + " last. The six add up to the whole change, because revenue is traffic "
+             + "\u00d7 conversion rate \u00d7 order value and everything else is a cost line.")
+          : ("The six lines add to " + fmtCurrency(explained) + " but profit actually moved "
+             + fmtCurrency(actualDelta) + " \u2014 a gap of " + fmtCurrency(Math.abs(residual))
+             + ". The PROFIT column and the cost columns disagree, so one has been edited by hand.")));
+  }
+
+  var changeBridgeCard = h("div", { style: { background: COLORS.panel,
+      border: "1px solid " + COLORS.panelBorder, borderRadius: 6,
+      padding: narrow ? 14 : 18, marginBottom: 14 } },
+    h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } },
+      "WHAT CHANGED SINCE " + monthName(prevPrefix).toUpperCase()),
+    bridgeBody);
+
   // --- "Am I OK?" ----------------------------------------------------------
   // One sentence, in money, plus the single weakest number. Someone who reads
   // nothing else on the page has still learned the most important thing.
@@ -1864,7 +1993,7 @@ function TraakDashboard() {
       weeklyControls, trafficGrid, adsRow, breakevenNote("be-weekly"), klaviyoRow,
       inventoryHeading, inventorySection,
       monthlyControls, monthlyGrid, monthlyFunnelGrid, monthlyAdsRow, breakevenNote("be-monthly"), monthlyFunnelNote,
-      dailyLinesCard, revenueSplitCard
+      dailyLinesCard, revenueSplitCard, changeBridgeCard
     ];
   }
 
