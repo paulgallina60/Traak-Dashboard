@@ -1145,9 +1145,14 @@ function TraakDashboard() {
   // heading links straight there instead of making you go and find the tab.
   // The id comes from KNOWN_SHEETS, so the link cannot drift from the sheet
   // this card actually reads. noopener/noreferrer because it opens a new tab.
+  // Sits next to the heading text, NOT pushed to the far right. On a wide
+  // monitor this row is ~2800px, and space-between put the link most of a
+  // screen away from the words it belongs to -- far enough that it read as
+  // missing. The date pickers on other sections can stay right-aligned
+  // because you go looking for those; a link has to be noticed.
   var inventoryHeading = h(SectionHeading, {
-      style: { display: "flex", justifyContent: "space-between", alignItems: "baseline",
-               flexWrap: "wrap", gap: 8 } },
+      style: { display: "flex", alignItems: "baseline", flexWrap: "wrap",
+               columnGap: 16, rowGap: 4 } },
     h("span", null, "Inventory Alerts"),
     h("a", { className: "sheet-link",
              href: "https://docs.google.com/spreadsheets/d/" + KNOWN_SHEETS.stockForecast + "/edit",
