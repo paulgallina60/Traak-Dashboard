@@ -35,6 +35,9 @@
   @media (max-width: 760px) {
     input, select, textarea { font-size: 16px !important; }
   }
+  /* Underline on hover so the link reads as one. Inline styles set the colour
+     and win on specificity, hence !important here. */
+  a.sheet-link:hover, a.sheet-link:focus-visible { text-decoration: underline !important; }
 </style>
 </head>
 <body>
@@ -1138,6 +1141,23 @@ function TraakDashboard() {
 
   var inventorySection = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } }, inventoryBody);
 
+  // Checking a level or changing a reorder point happens in the sheet, so the
+  // heading links straight there instead of making you go and find the tab.
+  // The id comes from KNOWN_SHEETS, so the link cannot drift from the sheet
+  // this card actually reads. noopener/noreferrer because it opens a new tab.
+  var inventoryHeading = h(SectionHeading, {
+      style: { display: "flex", justifyContent: "space-between", alignItems: "baseline",
+               flexWrap: "wrap", gap: 8 } },
+    h("span", null, "Inventory Alerts"),
+    h("a", { className: "sheet-link",
+             href: "https://docs.google.com/spreadsheets/d/" + KNOWN_SHEETS.stockForecast + "/edit",
+             target: "_blank", rel: "noopener noreferrer",
+             style: { fontFamily: "'Inter', sans-serif", fontSize: 11.5, fontWeight: 500,
+                      letterSpacing: "0.03em", textTransform: "none", color: COLORS.lane,
+                      textDecoration: "none", whiteSpace: "nowrap" } },
+      "Open Stock Forecast \u2197")
+  );
+
   // --- Monthly Analytics section ---
   var monthlyControls = h("div", { style: { display: "flex", flexDirection: narrow ? "column" : "row", justifyContent: "space-between", alignItems: narrow ? "flex-start" : "baseline", gap: narrow ? 8 : 0, marginTop: narrow ? 30 : 40, marginBottom: 14, borderBottom: "1px solid " + COLORS.panelBorder, paddingBottom: 8 } },
       h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: "0.1em", textTransform: "uppercase", color: COLORS.accent } }, "Monthly Analytics"),
@@ -1484,7 +1504,7 @@ function TraakDashboard() {
     tabContent = [
       dailyControls, dailyGrid,
       weeklyControls, trafficGrid, adsRow, klaviyoRow,
-      h(SectionHeading, null, "Inventory Alerts"), inventorySection,
+      inventoryHeading, inventorySection,
       monthlyControls, monthlyGrid, monthlyFunnelGrid, monthlyAdsRow, monthlyFunnelNote,
       dailyLinesCard, revenueSplitCard
     ];
