@@ -61,6 +61,43 @@ var COLORS = {
   green: "#34D399", orange: "#FBBF24", red: "#F87171",
 };
 
+// --- Brand configuration ---------------------------------------------------
+// Everything specific to one business lives here: what it is called, what it
+// sells, and what counts as a good number in its category. Another brand
+// overrides this block and nothing below it should need editing.
+//
+// KNOWN_SHEETS and TODO_WEB_APP_URL above belong here eventually too -- those,
+// plus the Shopify/GA4/Meta credentials the agents use, are what currently
+// make this Traak's dashboard rather than one anybody could run.
+var BRAND = {
+  name: "Traak",
+  currency: "A$",
+  category: "apparel",
+
+  // One place defines "good". The status colours and the plain-English
+  // verdicts both read these, so a colour can never disagree with the sentence
+  // sitting next to it. `typical` is what a healthy business in this category
+  // looks like -- the context a founder needs when a number means nothing on
+  // its own.
+  benchmarks: {
+    profitPct:             { good: 15,  warn: 8,   typical: "10-20% for apparel" },
+    sessionsToPdp:         { good: 100, warn: 80,  typical: "80-120% -- above 100% means people view more than one product" },
+    pdpToAtc:              { good: 10,  warn: 6,   typical: "8-12% for apparel" },
+    atcToCheckout:         { good: 50,  warn: 30,  typical: "40-60%" },
+    checkoutToTransaction: { good: 50,  warn: 30,  typical: "50-70%" },
+    ctr:                   { good: 1,   warn: 0.5, typical: "0.8-2% on paid social" },
+    openRate:              { good: 25,  warn: 10,  typical: "20-35% for campaigns" }
+  },
+
+  // Used only when this month's costs cannot be read, so break-even cannot be
+  // computed. Deliberately separate from the benchmarks above: these are a
+  // last resort, not a standard.
+  fallbackBands: {
+    cpa:  { good: 33,  warn: 40 },
+    roas: { good: 2.5, warn: 2 }
+  }
+};
+
 var KNOWN_SHEETS = {
   trafficConversion: "1RibBP4aU7ZCyb6NenGazAa92bpQkYdxoTnPmx7_NIPU",
   dailyTracker: "1TEJwWHvWQPJoo9zor7Zz-IAVegXIYX75hSWXCPMc57o",
@@ -580,6 +617,182 @@ function useNarrow() {
   return narrow;
 }
 
+// --- Plain-English layer ---------------------------------------------------
+// A dashboard that shows only numbers assumes you already know what they mean.
+// Each entry below carries a definition plus a verdict function that reads
+// THIS value against break-even or the category benchmark -- so the
+// explanation is about your number, not about the concept in the abstract.
+// Verdicts read BRAND.benchmarks, the same thresholds the status colours use,
+// so a sentence can never contradict the colour it sits beside.
+var HelpContext = React.createContext(null);
+
+function hasNum(v) { return v !== null && v !== undefined && !isNaN(v); }
+function pc(v, d) { return v.toFixed(d === undefined ? 1 : d) + "%"; }
+
+// Shared shape for the four funnel steps and the other "higher is better"
+// percentages, so one wording change applies to all of them.
+function benchmarkVerdict(key, v, lead) {
+  var b = BRAND.benchmarks[key];
+  if (!hasNum(v)) return "";
+  var where = " Typical is " + b.typical + ".";
+  if (v >= b.good) return lead + pc(v) + " is in good shape." + where;
+  if (v >= b.warn) return lead + pc(v) + " is below where you want it, though not alarming." + where;
+  return lead + pc(v) + " is well under par and is probably costing you real money." + where;
+}
+
+var METRICS = {
+  sales: {
+    title: "Sales",
+    plain: "Everything customers paid you, before any costs come out. It is the top line, not what you keep.",
+    verdict: function () { return "Compare it with profit below -- a big sales number can still lose money."; }
+  },
+  orders: {
+    title: "Orders",
+    plain: "How many separate purchases were placed."
+  },
+  sessions: {
+    title: "Sessions",
+    plain: "Visits to your site. One person browsing twice in a day counts twice.",
+    verdict: function () {
+      return "Sessions are the top of the funnel: everything below multiplies off this number, so a traffic drop shrinks revenue even when nothing else changed.";
+    }
+  },
+  aov: {
+    title: "Average order value (AOV)",
+    plain: "The average amount spent per order.",
+    verdict: function (v, ctx) {
+      if (!hasNum(v)) return "";
+      if (ctx && hasNum(ctx.breakevenCpa) && ctx.breakevenCpa > 0) {
+        return "At " + fmtCurrency(v) + " an order, you can afford to pay about "
+          + fmtCurrency(ctx.breakevenCpa) + " to win one before that order stops making money. "
+          + "Raising AOV raises what you can afford to bid.";
+      }
+      return "Raising this -- bundles, multi-buys, a higher-priced line -- lifts revenue without needing a single extra visitor.";
+    }
+  },
+  profitPct: {
+    title: "Profit margin",
+    plain: "What you keep out of every $100 of sales, after product cost, shipping, fees, overheads and advertising.",
+    verdict: function (v) {
+      var b = BRAND.benchmarks.profitPct;
+      if (!hasNum(v)) return "";
+      if (v < 0) return "You are losing " + Math.abs(v).toFixed(1)
+        + " cents on every dollar of sales. Costs are running ahead of revenue, so selling more makes the hole deeper, not shallower.";
+      if (v < b.warn) return "At " + pc(v) + " there is almost no room: one supplier price rise or a slow week puts this under water. Typical is " + b.typical + ".";
+      if (v < b.good) return pc(v) + " is workable, but little is left over to reinvest. Typical is " + b.typical + ".";
+      return pc(v) + " is healthy. Typical is " + b.typical + ".";
+    }
+  },
+  roas: {
+    title: "Return on ad spend (ROAS)",
+    plain: "For every dollar spent on ads, how many dollars of sales came back. 3x means a dollar in, three dollars out.",
+    verdict: function (v, ctx) {
+      if (!hasNum(v)) return "";
+      var be = ctx && ctx.breakevenRoas;
+      if (!hasNum(be)) return "Higher is better, but it only tells you the whole story alongside your costs -- this month's costs could not be read, so there is no break-even to compare against.";
+      var verb = v >= be ? "above" : "below";
+      return "You need " + be.toFixed(2) + "x just to break even once product, shipping, fees and overheads are paid. At "
+        + v.toFixed(2) + "x you are " + verb + " that line, so these ads are currently "
+        + (v >= be ? "contributing to profit." : "losing money even though sales are coming in.");
+    }
+  },
+  cpa: {
+    title: "Cost per acquisition (CPA)",
+    plain: "What you paid in advertising to win one order.",
+    verdict: function (v, ctx) {
+      if (!hasNum(v)) return "";
+      var be = ctx && ctx.breakevenCpa;
+      if (!hasNum(be)) return "Lower is better. Without this month's costs there is no break-even figure to compare it against.";
+      if (be <= 0) return "Your costs already exceed revenue before any advertising, so no CPA is affordable this month. The fix is in margin or overheads, not in the ad account.";
+      var over = v - be;
+      return "You can afford about " + fmtCurrency(be) + " per order before it stops making money. At "
+        + fmtCurrency(v) + " you are " + (over > 0 ? fmtCurrency(over) + " over that line, losing money on each order won."
+                                                   : fmtCurrency(-over) + " under it, so each order contributes.");
+    }
+  },
+  ctr: {
+    title: "Click-through rate (CTR)",
+    plain: "Of the people shown your ad, the share who clicked it.",
+    verdict: function (v) { return benchmarkVerdict("ctr", v, "A low CTR usually means the creative or the audience is wrong rather than the budget. "); }
+  },
+  sessionsToPdp: {
+    title: "Sessions to product page",
+    plain: "Of everyone who lands on the site, the share who go on to look at a product.",
+    verdict: function (v) { return benchmarkVerdict("sessionsToPdp", v, "Above 100% means the average visitor views more than one product. "); }
+  },
+  pdpToAtc: {
+    title: "Product page to add-to-cart",
+    plain: "Of the people who look at a product, the share who add it to their cart. This is the clearest read on whether the product page is persuading anyone.",
+    verdict: function (v) { return benchmarkVerdict("pdpToAtc", v, "Photography, reviews, sizing and price all show up here. "); }
+  },
+  atcToCheckout: {
+    title: "Add-to-cart to checkout",
+    plain: "Of the people who added something to the cart, the share who started checking out.",
+    verdict: function (v) { return benchmarkVerdict("atcToCheckout", v, "Drop-off here is usually shipping cost or delivery time appearing for the first time. "); }
+  },
+  checkoutToTransaction: {
+    title: "Checkout to order",
+    plain: "Of the people who started checkout, the share who actually paid.",
+    verdict: function (v) { return benchmarkVerdict("checkoutToTransaction", v, "Losses this late are usually payment options, forced account creation or a surprise at the last step. "); }
+  },
+  openRate: {
+    title: "Open rate",
+    plain: "The share of people who opened the email.",
+    verdict: function (v) { return benchmarkVerdict("openRate", v, "Subject line and sender reputation drive this. "); }
+  }
+};
+
+// The "?" and its panel. Keyed by a per-instance id, so opening ROAS on the
+// Meta card does not also open it on Google.
+// Takes one metric, or a group. A group is how the ad cards work: a panel
+// inside a 150px MiniStat cell would be unreadable, and seven separate "?"
+// marks on one card is clutter, so one "?" in the header explains the set.
+function MetricHelp(props) {
+  var help = React.useContext(HelpContext);
+  var id = React.useId();
+  var keys = (props.metrics || [props.metric]).filter(function (k) { return METRICS[k]; });
+  if (!help || !keys.length) return null;
+  var open = help.open === id;
+  var raws = props.raws || {};
+  if (props.metric) raws[props.metric] = props.raw;
+
+  var panel = null;
+  if (open) {
+    panel = h("div", { style: { marginTop: 12, paddingTop: 10,
+        borderTop: "1px solid " + COLORS.panelBorder,
+        // In the inline (card-header) case this is a flex item, so it has to
+        // claim a whole row or it sits beside the title and crushes it.
+        flexBasis: "100%", width: "100%", textAlign: "left" } },
+      keys.map(function (k, i) {
+        var def = METRICS[k];
+        var verdict = def.verdict ? def.verdict(raws[k], help.ctx) : "";
+        return h("div", { key: k, style: { marginTop: i ? 12 : 0 } },
+          h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 12.5,
+              letterSpacing: "0.04em", color: COLORS.text, marginBottom: 5 } }, def.title),
+          h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 12, lineHeight: 1.55,
+              color: COLORS.textMuted } }, def.plain),
+          verdict ? h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 12,
+              lineHeight: 1.55, color: COLORS.text, marginTop: 7 } }, verdict) : null);
+      }));
+  }
+
+  var inline = props.inline;
+  return h(React.Fragment, null,
+    h("button", {
+      onClick: function (e) { e.stopPropagation(); help.setOpen(open ? "" : id); },
+      title: "What does this mean?",
+      "aria-label": "Explain " + METRICS[keys[0]].title,
+      style: { position: inline ? "static" : "absolute", top: inline ? "auto" : 8,
+               right: inline ? "auto" : 8, width: 20, height: 20, flexShrink: 0,
+               padding: 0, lineHeight: "18px", textAlign: "center",
+               background: open ? COLORS.accent : "transparent",
+               border: "1px solid " + (open ? COLORS.accent : COLORS.panelBorder),
+               color: open ? COLORS.bg : COLORS.textFaint,
+               borderRadius: 10, cursor: "pointer",
+               fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 600 } }, "?"),
+    panel);
+}
+
 function SplitCard(props) {
   var narrow = useNarrow();
   var children = [
@@ -587,8 +800,11 @@ function SplitCard(props) {
     h("div", { style: { fontFamily: "'Oswald', sans-serif", fontWeight: 600, fontSize: props.big ? (narrow ? 30 : 40) : (narrow ? 22 : 26), color: COLORS.text, lineHeight: 1 } }, props.value),
   ];
   if (props.sub) { children.push(h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: COLORS.textMuted, marginTop: 6 } }, props.sub)); }
+  if (props.metric) {
+    children.push(h(MetricHelp, { key: "help", metric: props.metric, raw: props.raw }));
+  }
   return h("div", {
-    style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderLeft: "4px solid " + (props.color || COLORS.textFaint), borderRadius: 6, padding: narrow ? (props.big ? "16px 16px" : "13px 14px") : (props.big ? "22px 24px" : "16px 18px"), minWidth: 0 }
+    style: { position: "relative", background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderLeft: "4px solid " + (props.color || COLORS.textFaint), borderRadius: 6, padding: narrow ? (props.big ? "16px 16px" : "13px 14px") : (props.big ? "22px 24px" : "16px 18px"), paddingRight: props.metric ? 34 : undefined, minWidth: 0 }
   }, children);
 }
 
@@ -662,6 +878,14 @@ function MiniStat(props) {
 }
 
 function EmptyNote(props) { return h("div", { style: { color: COLORS.textFaint, fontFamily: "'Inter', sans-serif", fontSize: 13 } }, props.text); }
+
+function monthName(prefix) {
+  var parts = String(prefix || "").split("-");
+  var names = ["January", "February", "March", "April", "May", "June",
+               "July", "August", "September", "October", "November", "December"];
+  var i = parseInt(parts[1], 10) - 1;
+  return (names[i] ? names[i] + " " + parts[0] : String(prefix || ""));
+}
 
 function fmtCurrency(n) { return n === null || n === undefined ? "—" : "A$" + Math.round(n).toLocaleString(); }
 function fmtPct(n, d) { d = d === undefined ? 1 : d; return n === null || n === undefined || isNaN(n) ? "—" : n.toFixed(d) + "%"; }
@@ -928,6 +1152,9 @@ function TraakDashboard() {
 
   var narrow = useNarrow();
 
+  // Which explanation panel is open, keyed by the MetricHelp instance's id.
+  var [helpOpen, setHelpOpen] = useState("");
+
   var loadTodos = useCallback(function () {
     if (!TODO_WEB_APP_URL) return;
     setTodoBusy(true);
@@ -1064,7 +1291,7 @@ function TraakDashboard() {
   // Same bands apply_flag uses: healthy at 80% of break-even CPA, 120% of ROAS.
   var cpaBands = monthBreakeven
     ? { good: monthBreakeven.cpa * 0.8, warn: monthBreakeven.cpa }
-    : { good: 33, warn: 40 };
+    : BRAND.fallbackBands.cpa;
   var roasBands;
   if (monthBreakeven && monthBreakeven.roas) {
     roasBands = { good: monthBreakeven.roas * 1.2, warn: monthBreakeven.roas };
@@ -1073,7 +1300,7 @@ function TraakDashboard() {
     // the figure is left uncoloured rather than judged against a stale constant.
     roasBands = null;
   } else {
-    roasBands = { good: 2.5, warn: 2 };
+    roasBands = BRAND.fallbackBands.roas;
   }
   function roasColor(value) {
     return roasBands ? statusColor(value, roasBands) : COLORS.textFaint;
@@ -1119,10 +1346,10 @@ function TraakDashboard() {
   );
 
   var dailyGrid = dayData ? h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fit, minmax(160px, 1fr))", gap: narrow ? 10 : 14 } },
-    h(SplitCard, { big: true, label: "Sales", value: fmtCurrency(dayData.sales), color: COLORS.lane }),
-    h(SplitCard, { big: true, label: "Profit", value: fmtCurrency(dayData.profit), sub: fmtPct(dayData.profitPct) + " margin", color: statusColor(dayData.profitPct, { good: 15, warn: 8 }) }),
-    h(SplitCard, { big: true, label: "Orders", value: fmtNum(dayData.orders), sub: "AOV " + fmtCurrency(dayData.aov), color: COLORS.lane }),
-    h(SplitCard, { big: true, label: "Sessions", value: fmtNum(dayData.sessions), color: COLORS.lane }),
+    h(SplitCard, { big: true, label: "Sales", value: fmtCurrency(dayData.sales), color: COLORS.lane, metric: "sales", raw: dayData.sales }),
+    h(SplitCard, { big: true, label: "Profit", value: fmtCurrency(dayData.profit), sub: fmtPct(dayData.profitPct) + " margin", color: statusColor(dayData.profitPct, BRAND.benchmarks.profitPct), metric: "profitPct", raw: dayData.profitPct }),
+    h(SplitCard, { big: true, label: "Orders", value: fmtNum(dayData.orders), sub: "AOV " + fmtCurrency(dayData.aov), color: COLORS.lane, metric: "aov", raw: dayData.aov }),
+    h(SplitCard, { big: true, label: "Sessions", value: fmtNum(dayData.sessions), color: COLORS.lane, metric: "sessions", raw: dayData.sessions }),
     h(SplitCard, { big: true, label: "Meta Spend", value: fmtCurrency(dayData.meta), color: COLORS.lane }),
     h(SplitCard, { big: true, label: "Google Spend", value: fmtCurrency(dayData.google), color: COLORS.lane })
   ) : h(EmptyNote, { text: errors.dailyTracker || "Loading daily data..." });
@@ -1135,11 +1362,11 @@ function TraakDashboard() {
   );
 
   var trafficGrid = h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fit, minmax(200px, 1fr))", gap: narrow ? 10 : 14, marginBottom: 14 } },
-    h(SplitCard, { label: "Sessions", value: weekCf ? fmtNum(weekCf.sessions) : (errors.conversionFunnel || "…"), color: COLORS.lane }),
-    h(SplitCard, { label: "Sessions → PDP", value: weekCf ? fmtPct(weekCf.sessionsToPdp) : "…", color: statusColor(weekCf && weekCf.sessionsToPdp, { good: 100, warn: 80 }) }),
-    h(SplitCard, { label: "PDP → ATC", value: weekCf ? fmtPct(weekCf.pdpToAtc) : "…", sub: "Primary health metric", color: statusColor(weekCf && weekCf.pdpToAtc, { good: 10, warn: 6 }) }),
-    h(SplitCard, { label: "ATC → Checkout", value: weekCf ? fmtPct(weekCf.atcToCheckout) : "…", color: statusColor(weekCf && weekCf.atcToCheckout, { good: 50, warn: 30 }) }),
-    h(SplitCard, { label: "Checkout → Order", value: weekCf ? fmtPct(weekCf.checkoutToTransaction) : "…", color: statusColor(weekCf && weekCf.checkoutToTransaction, { good: 50, warn: 30 }) })
+    h(SplitCard, { label: "Sessions", value: weekCf ? fmtNum(weekCf.sessions) : (errors.conversionFunnel || "…"), color: COLORS.lane, metric: "sessions", raw: weekCf && weekCf.sessions }),
+    h(SplitCard, { label: "Sessions → PDP", value: weekCf ? fmtPct(weekCf.sessionsToPdp) : "…", color: statusColor(weekCf && weekCf.sessionsToPdp, BRAND.benchmarks.sessionsToPdp), metric: "sessionsToPdp", raw: weekCf && weekCf.sessionsToPdp }),
+    h(SplitCard, { label: "PDP → ATC", value: weekCf ? fmtPct(weekCf.pdpToAtc) : "…", sub: "Primary health metric", color: statusColor(weekCf && weekCf.pdpToAtc, BRAND.benchmarks.pdpToAtc), metric: "pdpToAtc", raw: weekCf && weekCf.pdpToAtc }),
+    h(SplitCard, { label: "ATC → Checkout", value: weekCf ? fmtPct(weekCf.atcToCheckout) : "…", color: statusColor(weekCf && weekCf.atcToCheckout, BRAND.benchmarks.atcToCheckout), metric: "atcToCheckout", raw: weekCf && weekCf.atcToCheckout }),
+    h(SplitCard, { label: "Checkout → Order", value: weekCf ? fmtPct(weekCf.checkoutToTransaction) : "…", color: statusColor(weekCf && weekCf.checkoutToTransaction, BRAND.benchmarks.checkoutToTransaction), metric: "checkoutToTransaction", raw: weekCf && weekCf.checkoutToTransaction })
   );
 
   function adPlatformCard(title, platformData, errKey) {
@@ -1150,10 +1377,14 @@ function TraakDashboard() {
       h(MiniStat, { label: "CPA", value: fmtCurrency(platformData.cpa), color: statusColor(platformData.cpa, cpaBands, true) }),
       h(MiniStat, { label: "Conversions", value: fmtNum(platformData.conversions) }),
       h(MiniStat, { label: "Clicks", value: fmtNum(platformData.clicks) }),
-      h(MiniStat, { label: "CTR", value: fmtPct(platformData.ctr), color: statusColor(platformData.ctr, { good: 1, warn: 0.5 }) })
+      h(MiniStat, { label: "CTR", value: fmtPct(platformData.ctr), color: statusColor(platformData.ctr, BRAND.benchmarks.ctr) })
     ) : h(EmptyNote, { text: errors[errKey] || "No data for this week" });
     return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } },
-      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, title), body
+      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", marginBottom: 12 } },
+        h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14 } }, title),
+        platformData ? h(MetricHelp, { inline: true, metrics: ["roas", "cpa", "ctr"],
+          raws: { roas: platformData.roas, cpa: platformData.cpa, ctr: platformData.ctr } }) : null),
+      body
     );
   }
 
@@ -1163,11 +1394,15 @@ function TraakDashboard() {
 
   function klaviyoCard(title, sectionData) {
     var body = sectionData ? h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, 1fr)" : "1fr 1fr 1fr", gap: 12 } },
-      h(MiniStat, { label: "Open Rate", value: fmtPct(sectionData.openRate), color: statusColor(sectionData.openRate, { good: 25, warn: 10 }) }),
+      h(MiniStat, { label: "Open Rate", value: fmtPct(sectionData.openRate), color: statusColor(sectionData.openRate, BRAND.benchmarks.openRate) }),
       h(MiniStat, { label: "Click Rate", value: fmtPct(sectionData.clickRate) }), h(MiniStat, { label: "Revenue", value: fmtCurrency(sectionData.revenue) })
     ) : h(EmptyNote, { text: errors.klaviyo || "No data for this week" });
     return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } },
-      h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, title), body
+      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", marginBottom: 12 } },
+        h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14 } }, title),
+        sectionData ? h(MetricHelp, { inline: true, metrics: ["openRate"],
+          raws: { openRate: sectionData.openRate } }) : null),
+      body
     );
   }
 
@@ -1222,9 +1457,9 @@ function TraakDashboard() {
   );
 
   var monthlyGrid = h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fit, minmax(180px, 1fr))", gap: narrow ? 10 : 14, marginBottom: 14 } },
-    h(SplitCard, { big: true, label: "Sales (month)", value: monthDaily ? fmtCurrency(monthDaily.sales) : "…", color: COLORS.lane }),
-    h(SplitCard, { big: true, label: "Profit (month)", value: monthDaily ? fmtCurrency(monthDaily.profit) : "…", sub: monthDaily ? fmtPct(monthDaily.profitPct) + " margin" : null, color: statusColor(monthDaily && monthDaily.profitPct, { good: 15, warn: 8 }) }),
-    h(SplitCard, { big: true, label: "Orders (month)", value: monthDaily ? fmtNum(monthDaily.orders) : "…", sub: monthDaily ? "AOV " + fmtCurrency(monthDaily.aov) : null, color: COLORS.lane })
+    h(SplitCard, { big: true, label: "Sales (month)", value: monthDaily ? fmtCurrency(monthDaily.sales) : "…", color: COLORS.lane, metric: "sales", raw: monthDaily && monthDaily.sales }),
+    h(SplitCard, { big: true, label: "Profit (month)", value: monthDaily ? fmtCurrency(monthDaily.profit) : "…", sub: monthDaily ? fmtPct(monthDaily.profitPct) + " margin" : null, color: statusColor(monthDaily && monthDaily.profitPct, BRAND.benchmarks.profitPct), metric: "profitPct", raw: monthDaily && monthDaily.profitPct }),
+    h(SplitCard, { big: true, label: "Orders (month)", value: monthDaily ? fmtNum(monthDaily.orders) : "…", sub: monthDaily ? "AOV " + fmtCurrency(monthDaily.aov) : null, color: COLORS.lane, metric: "aov", raw: monthDaily && monthDaily.aov })
   );
 
   // Monthly funnel -- same five metrics and same thresholds as the weekly row,
@@ -1233,16 +1468,20 @@ function TraakDashboard() {
     h(SplitCard, { label: "Sessions (month)", value: monthFunnel ? fmtNum(monthFunnel.sessions) : "…", color: COLORS.lane }),
     h(SplitCard, { label: "Sessions \u2192 PDP", value: monthFunnel ? fmtPct(monthFunnel.sessionsToPdp) : "…",
       sub: monthFunnel ? fmtNum(monthFunnel.pdpViews) + " PDP views" : null,
-      color: statusColor(monthFunnel && monthFunnel.sessionsToPdp, { good: 100, warn: 80 }) }),
+      color: statusColor(monthFunnel && monthFunnel.sessionsToPdp, BRAND.benchmarks.sessionsToPdp),
+      metric: "sessionsToPdp", raw: monthFunnel && monthFunnel.sessionsToPdp }),
     h(SplitCard, { label: "PDP \u2192 ATC", value: monthFunnel ? fmtPct(monthFunnel.pdpToAtc) : "…",
       sub: monthFunnel ? "Primary health metric" : null,
-      color: statusColor(monthFunnel && monthFunnel.pdpToAtc, { good: 10, warn: 6 }) }),
+      color: statusColor(monthFunnel && monthFunnel.pdpToAtc, BRAND.benchmarks.pdpToAtc),
+      metric: "pdpToAtc", raw: monthFunnel && monthFunnel.pdpToAtc }),
     h(SplitCard, { label: "ATC \u2192 Checkout", value: monthFunnel ? fmtPct(monthFunnel.atcToCheckout) : "…",
       sub: monthFunnel ? fmtNum(monthFunnel.addToCart) + " add to cart" : null,
-      color: statusColor(monthFunnel && monthFunnel.atcToCheckout, { good: 50, warn: 30 }) }),
+      color: statusColor(monthFunnel && monthFunnel.atcToCheckout, BRAND.benchmarks.atcToCheckout),
+      metric: "atcToCheckout", raw: monthFunnel && monthFunnel.atcToCheckout }),
     h(SplitCard, { label: "Checkout \u2192 Order", value: monthFunnel ? fmtPct(monthFunnel.checkoutToTransaction) : "…",
       sub: monthFunnel ? fmtNum(monthFunnel.transactions) + " orders" : null,
-      color: statusColor(monthFunnel && monthFunnel.checkoutToTransaction, { good: 50, warn: 30 }) })
+      color: statusColor(monthFunnel && monthFunnel.checkoutToTransaction, BRAND.benchmarks.checkoutToTransaction),
+      metric: "checkoutToTransaction", raw: monthFunnel && monthFunnel.checkoutToTransaction })
   );
 
   var monthlyAdsRow = h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "1fr" : "1fr 1fr", gap: narrow ? 10 : 14, marginBottom: 14 } },
@@ -1335,6 +1574,68 @@ function TraakDashboard() {
              + fmtCurrency(monthDaily.sales) + " \u2014 a gap of " + fmtCurrency(drift)
              + ". The PROFIT column and the cost columns disagree, so one of them has been edited by hand."))
     );
+  }
+
+  // --- "Am I OK?" ----------------------------------------------------------
+  // One sentence, in money, plus the single weakest number. Someone who reads
+  // nothing else on the page has still learned the most important thing.
+  //
+  // "Weakest" is relative distance below benchmark, not absolute: a 4%
+  // product-page-to-cart rate against a typical 8-12% outranks a 48% checkout
+  // rate against a typical 50-70%, even though the second is a bigger gap in
+  // percentage points. Without a plan to compare against, benchmark distance
+  // is the most honest proxy for "what is holding you back".
+  var headlineEl = null;
+  if (monthDaily) {
+    var dayCount = monthDays.length || 1;
+    var perDay = monthDaily.profit / dayCount;
+    var moneyPhrase = monthDaily.profit >= 0
+      ? "making about " + fmtCurrency(perDay) + " a day"
+      : "losing about " + fmtCurrency(Math.abs(perDay)) + " a day";
+
+    var weakCandidates = [];
+    if (monthFunnel) {
+      [["sessionsToPdp", "getting visitors onto a product page"],
+       ["pdpToAtc", "turning product views into carts"],
+       ["atcToCheckout", "getting carts into checkout"],
+       ["checkoutToTransaction", "closing checkouts"]].forEach(function (pair) {
+        var v = monthFunnel[pair[0]], b = BRAND.benchmarks[pair[0]];
+        // Ranked against `warn`, not `good`: a rate inside its typical band is
+        // not "the weakest part of the business", and saying so cries wolf.
+        if (v > 0) weakCandidates.push({ ratio: v / b.warn, label: pair[1],
+          detail: fmtPct(v) + " against a typical " + b.typical });
+      });
+    }
+    if (monthBreakeven && monthBreakeven.cpa > 0 && monthDaily.orders) {
+      var blendedCpa = monthDaily.adSpend / monthDaily.orders;
+      if (blendedCpa > 0) weakCandidates.push({ ratio: monthBreakeven.cpa / blendedCpa,
+        label: "what you pay to win an order",
+        detail: fmtCurrency(blendedCpa) + " against the " + fmtCurrency(monthBreakeven.cpa) + " you can afford" });
+    }
+    weakCandidates.sort(function (a, b) { return a.ratio - b.ratio; });
+    var weakest = (weakCandidates.length && weakCandidates[0].ratio < 1) ? weakCandidates[0] : null;
+    // Nothing below par but still losing money is a real and different
+    // answer -- the problem is cost, not the website -- and saying "nothing is
+    // below benchmark" next to "losing money" would read as a contradiction.
+    var allFineButLosing = !weakest && monthDaily.profit < 0;
+
+    headlineEl = h("div", { style: { background: COLORS.panel,
+        border: "1px solid " + COLORS.panelBorder,
+        borderLeft: "4px solid " + (monthDaily.profit >= 0 ? COLORS.green : COLORS.red),
+        borderRadius: 6, padding: narrow ? "13px 14px" : "15px 18px", marginTop: 18,
+        fontFamily: "'Inter', sans-serif", fontSize: narrow ? 13.5 : 15, lineHeight: 1.55 } },
+      h("span", { style: { color: COLORS.text, fontWeight: 600 } },
+        monthName(selectedMonth) + " so far: " + moneyPhrase + "."),
+      weakest
+        ? h("span", { style: { color: COLORS.textMuted } },
+            " The weakest part of the business right now is " + weakest.label
+            + " \u2014 " + weakest.detail + ".")
+        : allFineButLosing
+        ? h("span", { style: { color: COLORS.textMuted } },
+            " Every step of the funnel is within its normal range, so the problem is cost rather "
+            + "than the website \u2014 look at ad efficiency, overheads or margin.")
+        : h("span", { style: { color: COLORS.textMuted } },
+            " Nothing is currently sitting below its benchmark."));
   }
 
   var revenueSplitCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18, marginBottom: 14 } },
@@ -1567,10 +1868,24 @@ function TraakDashboard() {
     ];
   }
 
-  return h("div", { style: { background: COLORS.bg, minHeight: "100vh", color: COLORS.text, fontFamily: "'Inter', sans-serif", padding: narrow ? "16px 14px 48px" : "28px 32px 60px" } },
-    headerRow,
-    h(TabBar, { active: activeTab, onSelect: selectTab, openTodos: openCount }),
-    h("div", { key: activeTab }, tabContent)
+  // Break-even travels with the context, so a verdict sentence is judged
+  // against the same figure as the colour sitting beside it.
+  var helpValue = {
+    open: helpOpen,
+    setOpen: setHelpOpen,
+    ctx: {
+      breakevenCpa: monthBreakeven ? monthBreakeven.cpa : null,
+      breakevenRoas: monthBreakeven ? monthBreakeven.roas : null
+    }
+  };
+
+  return h(HelpContext.Provider, { value: helpValue },
+    h("div", { style: { background: COLORS.bg, minHeight: "100vh", color: COLORS.text, fontFamily: "'Inter', sans-serif", padding: narrow ? "16px 14px 48px" : "28px 32px 60px" } },
+      headerRow,
+      headlineEl,
+      h(TabBar, { active: activeTab, onSelect: selectTab, openTodos: openCount }),
+      h("div", { key: activeTab }, tabContent)
+    )
   );
 }
 
