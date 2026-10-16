@@ -49,6 +49,7 @@
 "use strict";
 var h = React.createElement;
 var useState = React.useState, useEffect = React.useEffect, useCallback = React.useCallback;
+var useRef = React.useRef;
 
 var COLORS = {
   bg: "#111417", panel: "#1A1E22", panelBorder: "#262B30",
@@ -257,8 +258,13 @@ function parseDailyTracker(rows) {
   }
   var headers = rows[headerRowIndex];
 
+  // Exact header labels as traak-ops-agentv2/sheets_client.py writes them --
+  // note "COGs (Actual)", not "COGS". colIndex matches the whole trimmed label,
+  // so a near-miss here reads as a missing column rather than the wrong one.
   var COLS = { sales: "Sales", orders: "Orders", sessions: "Sessions",
-               meta: "Meta", google: "Google", profit: "PROFIT" };
+               meta: "Meta", google: "Google", profit: "PROFIT",
+               adSpend: "Total Ad Spend", opex: "OPEX",
+               cogs: "COGs (Actual)", shipping: "Shipping", fees: "Fees" };
   var idx = {};
   Object.keys(COLS).forEach(function (key) {
     idx[key] = colIndex(headers, COLS[key]);
@@ -278,9 +284,18 @@ function parseDailyTracker(rows) {
     var d = extractDate(r[0]);
     if (!d) continue;
     var sales = value(r, "sales"), orders = value(r, "orders"), profit = value(r, "profit");
+    // Cost of delivery: what it costs to fulfil the revenue, as opposed to
+    // running the business (OPEX) or buying the traffic (ad spend). Null only
+    // when every one of the three columns is absent -- a genuinely empty cell
+    // is a real zero and should stay one.
+    var cogs = value(r, "cogs"), shipping = value(r, "shipping"), fees = value(r, "fees");
+    var cod = (cogs === null && shipping === null && fees === null)
+      ? null : (cogs || 0) + (shipping || 0) + (fees || 0);
     dailyData[d] = {
       sales: sales, orders: orders, profit: profit,
       sessions: value(r, "sessions"), meta: value(r, "meta"), google: value(r, "google"),
+      adSpend: value(r, "adSpend"), opex: value(r, "opex"),
+      cogs: cogs, shipping: shipping, fees: fees, cod: cod,
       aov: orders ? sales / orders : 0,
       profitPct: (sales && profit !== null) ? (profit / sales) * 100 : 0
     };
@@ -508,14 +523,23 @@ function aggregateMonthlyAds(weeksObj, monthPrefix) {
 function aggregateMonthlyDaily(byDate, monthPrefix) {
   if (!byDate) return null;
   var sales = 0, orders = 0, profit = 0, matchedAny = false;
+  var cod = 0, opex = 0, adSpend = 0, haveCosts = false;
   Object.keys(byDate).forEach(function (dateKey) {
     if (dateKey.indexOf(monthPrefix) !== 0) return;
     matchedAny = true;
     var day = byDate[dateKey];
     sales += day.sales; orders += day.orders; profit += day.profit;
+    if (day.cod !== null && day.cod !== undefined) { cod += day.cod; haveCosts = true; }
+    opex += day.opex || 0;
+    adSpend += day.adSpend || 0;
   });
   if (!matchedAny) return null;
-  return { sales: sales, orders: orders, profit: profit, aov: orders ? sales / orders : 0, profitPct: sales ? (profit / sales) * 100 : 0 };
+  return { sales: sales, orders: orders, profit: profit,
+           aov: orders ? sales / orders : 0, profitPct: sales ? (profit / sales) * 100 : 0,
+           // Sales = COD + OPEX + Total Ad Spend + PROFIT, because the sheet
+           // derives Total Opex = OPEX+COGS+Shipping+Fees, Total Expenses =
+           // Total Opex + Total Ad Spend, and PROFIT = Sales - Total Expenses.
+           cod: cod, opex: opex, adSpend: adSpend, haveCosts: haveCosts };
 }
 
 function statusColor(value, thresholds, invert) {
@@ -640,6 +664,233 @@ function fmtCurrency(n) { return n === null || n === undefined ? "—" : "A$" + 
 function fmtPct(n, d) { d = d === undefined ? 1 : d; return n === null || n === undefined || isNaN(n) ? "—" : n.toFixed(d) + "%"; }
 function fmtNum(n) { return n === null || n === undefined ? "—" : Math.round(n).toLocaleString(); }
 function fmtRoas(n) { return n === null || n === undefined ? "—" : n.toFixed(2) + "x"; }
+
+// --- Charts ---------------------------------------------------------------
+// Drawn as inline SVG rather than pulling in a charting library. This page is
+// a single file with no build step, and a canvas library would be the heaviest
+// thing on it by some margin; SVG also stays sharp on a phone and takes the
+// theme colours directly.
+
+// Categorical series colours, assigned in fixed slot order so a colour always
+// means the same series. Checked against this dashboard's panel (#1A1E22) for
+// contrast and for colour-blind separation. The dashboard's own green/yellow
+// are text accents -- too light to work as fills, which is why these differ.
+var SERIES = { blue: "#3987E5", orange: "#D95926", aqua: "#199E70", gold: "#C98500" };
+
+function relLuminance(hex) {
+  function lin(c) { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+  return 0.2126 * lin(parseInt(hex.slice(1, 3), 16))
+       + 0.7152 * lin(parseInt(hex.slice(3, 5), 16))
+       + 0.0722 * lin(parseInt(hex.slice(5, 7), 16));
+}
+function contrastRatio(a, b) {
+  var la = relLuminance(a), lb = relLuminance(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+// Dark or light text, whichever actually contrasts better on a given fill.
+// Comparing the two ratios beats thresholding on luminance: every one of these
+// series colours sits in the band where a naive midpoint test picks white, yet
+// dark text is around 5:1 on them against white's 3:1.
+function inkOn(hex) {
+  return contrastRatio("#111417", hex) >= contrastRatio("#FFFFFF", hex) ? "#111417" : "#FFFFFF";
+}
+
+// SVG has no layout engine, so the chart needs its container's pixel width
+// before it can draw. Measuring beats a percentage viewBox, which would
+// stretch the text along with the plot.
+function useMeasuredWidth() {
+  var ref = useRef(null);
+  var pair = useState(0), width = pair[0], setWidth = pair[1];
+  useEffect(function () {
+    var el = ref.current;
+    if (!el) return undefined;
+    function measure() { if (ref.current) setWidth(ref.current.clientWidth); }
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return function () { window.removeEventListener("resize", measure); };
+    }
+    var ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return function () { ro.disconnect(); };
+  }, []);
+  return [ref, width];
+}
+
+// Gridlines land on round numbers rather than on the data's exact extremes,
+// so the axis reads in 500s and 1000s instead of 487.33s.
+function niceStep(raw) {
+  if (!(raw > 0)) return 1;
+  var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+  var norm = raw / mag;
+  var mult = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10;
+  return mag * mult;
+}
+function niceBounds(min, max, ticks) {
+  ticks = ticks || 4;
+  if (!isFinite(min) || !isFinite(max)) { min = 0; max = 1; }
+  if (max === min) { min = Math.min(0, min); max = Math.max(1, max); }
+  var step = niceStep((max - min) / ticks);
+  return { lo: Math.floor(min / step) * step, hi: Math.ceil(max / step) * step, step: step };
+}
+
+function axisMoney(v) {
+  var a = Math.abs(v);
+  if (a >= 1000) return (v < 0 ? "-$" : "$") + (a / 1000).toFixed(a % 1000 === 0 ? 0 : 1) + "k";
+  return (v < 0 ? "-$" : "$") + Math.round(a);
+}
+
+function ChartLegend(props) {
+  return h("div", { style: { display: "flex", flexWrap: "wrap", gap: 14, marginBottom: 10 } },
+    props.items.map(function (it) {
+      return h("div", { key: it.label, style: { display: "flex", alignItems: "center", gap: 6 } },
+        h("span", { style: { width: 10, height: 10, borderRadius: 2, background: it.color, flexShrink: 0 } }),
+        h("span", { style: { fontFamily: "'Inter', sans-serif", fontSize: 11, color: COLORS.textMuted } }, it.label));
+    }));
+}
+
+// Two money series against ONE shared axis. Both are AUD, so a second y-scale
+// would be a lie about their relative size -- the whole point of the chart is
+// seeing spend sit above or below profit.
+function DailyLinesChart(props) {
+  var narrow = useNarrow();
+  var measured = useMeasuredWidth(), boxRef = measured[0], boxW = measured[1];
+  var hoverPair = useState(-1), hover = hoverPair[0], setHover = hoverPair[1];
+
+  var pts = props.points || [];
+  var H = narrow ? 210 : 260;
+  var padL = narrow ? 44 : 56, padR = 10, padT = 10, padB = 24;
+  var W = Math.max(boxW, 260);
+  var innerW = Math.max(W - padL - padR, 10);
+  var innerH = Math.max(H - padT - padB, 10);
+
+  var lo = 0, hi = 0;
+  pts.forEach(function (p) {
+    lo = Math.min(lo, p.profit, p.spend);
+    hi = Math.max(hi, p.profit, p.spend);
+  });
+  var b = niceBounds(lo, hi, 4);
+  var span = (b.hi - b.lo) || 1;
+
+  function X(i) { return padL + (pts.length <= 1 ? innerW / 2 : (i / (pts.length - 1)) * innerW); }
+  function Y(v) { return padT + innerH - ((v - b.lo) / span) * innerH; }
+  function line(key) {
+    return pts.map(function (p, i) {
+      return (i ? "L" : "M") + X(i).toFixed(1) + " " + Y(p[key]).toFixed(1);
+    }).join(" ");
+  }
+
+  var ticks = [];
+  for (var t = b.lo; t <= b.hi + 1e-9; t += b.step) ticks.push(t);
+
+  // Thin the day labels until they stop colliding, rather than rotating them.
+  var every = Math.max(1, Math.ceil(pts.length / Math.max(1, Math.floor(innerW / (narrow ? 26 : 34)))));
+
+  var chart = boxW > 0 && pts.length ? h("svg", {
+      width: W, height: H, style: { display: "block", touchAction: "pan-y" },
+      onMouseLeave: function () { setHover(-1); },
+      onPointerMove: function (e) {
+        var r = e.currentTarget.getBoundingClientRect();
+        var rel = e.clientX - r.left - padL;
+        var i = pts.length <= 1 ? 0 : Math.round((rel / innerW) * (pts.length - 1));
+        setHover(Math.max(0, Math.min(pts.length - 1, i)));
+      }
+    },
+    ticks.map(function (v) {
+      var zero = Math.abs(v) < 1e-9;
+      return h("g", { key: "t" + v },
+        h("line", { x1: padL, x2: padL + innerW, y1: Y(v), y2: Y(v),
+          stroke: zero ? COLORS.textFaint : COLORS.panelBorder, strokeWidth: 1 }),
+        h("text", { x: padL - 8, y: Y(v) + 4, textAnchor: "end",
+          style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fill: COLORS.textFaint } },
+          axisMoney(v)));
+    }),
+    pts.map(function (p, i) {
+      return i % every === 0 ? h("text", { key: "x" + i, x: X(i), y: H - 8, textAnchor: "middle",
+        style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fill: COLORS.textFaint } }, p.label) : null;
+    }),
+    h("path", { d: line("spend"), fill: "none", stroke: SERIES.orange, strokeWidth: 2,
+      strokeLinejoin: "round", strokeLinecap: "round" }),
+    h("path", { d: line("profit"), fill: "none", stroke: SERIES.blue, strokeWidth: 2,
+      strokeLinejoin: "round", strokeLinecap: "round" }),
+    hover >= 0 && hover < pts.length ? h("g", null,
+      h("line", { x1: X(hover), x2: X(hover), y1: padT, y2: padT + innerH,
+        stroke: COLORS.textFaint, strokeWidth: 1, strokeDasharray: "3 3" }),
+      // 2px surface ring so a marker stays visible where the lines cross
+      h("circle", { cx: X(hover), cy: Y(pts[hover].spend), r: 4.5, fill: SERIES.orange,
+        stroke: COLORS.panel, strokeWidth: 2 }),
+      h("circle", { cx: X(hover), cy: Y(pts[hover].profit), r: 4.5, fill: SERIES.blue,
+        stroke: COLORS.panel, strokeWidth: 2 })
+    ) : null
+  ) : null;
+
+  var tip = null;
+  if (hover >= 0 && hover < pts.length && boxW > 0) {
+    var p = pts[hover];
+    var leftSide = X(hover) > W / 2;
+    tip = h("div", { style: {
+        position: "absolute", top: 6, pointerEvents: "none",
+        left: leftSide ? padL + 6 : "auto", right: leftSide ? "auto" : 8,
+        background: COLORS.bg, border: "1px solid " + COLORS.panelBorder,
+        borderRadius: 5, padding: "7px 10px", minWidth: 128 } },
+      h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10,
+        color: COLORS.textMuted, marginBottom: 5 } }, p.key),
+      [["Profit", p.profit, SERIES.blue], ["Marketing", p.spend, SERIES.orange]].map(function (rw) {
+        return h("div", { key: rw[0], style: { display: "flex", alignItems: "center",
+            justifyContent: "space-between", gap: 12, marginTop: 2 } },
+          h("span", { style: { display: "flex", alignItems: "center", gap: 5 } },
+            h("span", { style: { width: 8, height: 8, borderRadius: 2, background: rw[2] } }),
+            h("span", { style: { fontFamily: "'Inter', sans-serif", fontSize: 11, color: COLORS.textMuted } }, rw[0])),
+          h("span", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11,
+            color: COLORS.text } }, fmtCurrency(rw[1])));
+      }));
+  }
+
+  return h("div", null,
+    h(ChartLegend, { items: [
+      { label: "Daily profit", color: SERIES.blue },
+      { label: "Marketing spend", color: SERIES.orange } ] }),
+    h("div", { ref: boxRef, style: { position: "relative", width: "100%", minHeight: H } }, chart, tip));
+}
+
+// Part-to-whole as a single 100% bar. Four shares of similar size are hard to
+// compare as pie wedges, and the bar reads the same on a phone as on a desk.
+function ShareBar(props) {
+  var narrow = useNarrow();
+  var parts = props.parts, total = props.total;
+  var barH = narrow ? 30 : 36;
+  var drawn = parts.filter(function (p) { return p.value > 0; });
+
+  return h("div", null,
+    h("div", { style: { display: "flex", gap: 2, height: barH, marginBottom: 12,
+                        borderRadius: 4, overflow: "hidden" } },
+      drawn.map(function (p) {
+        var share = total ? (p.value / total) * 100 : 0;
+        return h("div", { key: p.label, title: p.label + " " + share.toFixed(1) + "%",
+          style: { flexGrow: share, flexBasis: 0, minWidth: 3, background: p.color,
+                   display: "flex", alignItems: "center", justifyContent: "center" } },
+          // Only label inside where the segment is genuinely wide enough; the
+          // row below carries every value regardless.
+          share >= (narrow ? 10 : 8) ? h("span", { style: { fontFamily: "'IBM Plex Mono', monospace",
+            fontSize: narrow ? 11 : 12, fontWeight: 600, color: inkOn(p.color) } },
+            share.toFixed(0) + "%") : null);
+      })),
+    h("div", { style: { display: "grid",
+        gridTemplateColumns: narrow ? "1fr 1fr" : "repeat(4, 1fr)", gap: narrow ? 10 : 14 } },
+      parts.map(function (p) {
+        var share = total ? (p.value / total) * 100 : 0;
+        return h("div", { key: p.label, style: { minWidth: 0 } },
+          h("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 3 } },
+            h("span", { style: { width: 10, height: 10, borderRadius: 2, background: p.color, flexShrink: 0 } }),
+            h("span", { style: { fontFamily: "'Inter', sans-serif", fontSize: 10,
+              letterSpacing: "0.06em", textTransform: "uppercase", color: COLORS.textMuted } }, p.label)),
+          h("div", { style: { fontFamily: "'IBM Plex Mono', monospace",
+            fontSize: narrow ? 14 : 16, fontWeight: 600, color: COLORS.text } },
+            share.toFixed(1) + "%"),
+          h("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11,
+            color: COLORS.textMuted, marginTop: 1 } }, fmtCurrency(p.value)));
+      })));
+}
 
 function TraakDashboard() {
   var dataState = useState({});
@@ -940,6 +1191,81 @@ function TraakDashboard() {
     })()
   );
 
+  // --- Daily profit vs marketing spend -------------------------------------
+  var monthDays = [];
+  if (data.dailyTracker) {
+    Object.keys(data.dailyTracker.byDate).sort().forEach(function (k) {
+      if (k.indexOf(selectedMonth) !== 0) return;
+      var d = data.dailyTracker.byDate[k];
+      // Total Ad Spend rather than Meta + Google, so TikTok (and anything added
+      // to that formula later) is counted without touching this file again.
+      monthDays.push({ key: k, label: String(Number(k.slice(8, 10))),
+                       profit: d.profit || 0, spend: d.adSpend || 0 });
+    });
+  }
+
+  var dailyLinesCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18, marginBottom: 14 } },
+    h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } },
+      "DAILY PROFIT vs MARKETING SPEND"),
+    monthDays.length
+      ? h(DailyLinesChart, { points: monthDays })
+      : h(EmptyNote, { text: errors.dailyTracker || "No daily rows for this month yet" })
+  );
+
+  // --- Where the revenue went ----------------------------------------------
+  var splitBody;
+  if (!monthDaily) {
+    splitBody = h(EmptyNote, { text: errors.dailyTracker || "No daily rows for this month yet" });
+  } else if (!monthDaily.haveCosts) {
+    splitBody = h(EmptyNote, { text: "Daily Tracker has no COGs (Actual), Shipping or Fees column to read." });
+  } else {
+    var allParts = [
+      { label: "COD", value: monthDaily.cod, color: SERIES.blue },
+      { label: "OpEX", value: monthDaily.opex, color: SERIES.orange },
+      { label: "Marketing", value: monthDaily.adSpend, color: SERIES.aqua },
+      { label: "Profit", value: monthDaily.profit, color: SERIES.gold }
+    ];
+    var lossMonth = monthDaily.profit < 0;
+    // A negative share cannot be drawn, so a loss month is shown as a split of
+    // spend instead, and says so, rather than quietly dropping the profit slice.
+    var shownParts = lossMonth ? allParts.slice(0, 3) : allParts;
+    var denom = 0;
+    shownParts.forEach(function (p) { denom += p.value; });
+
+    // The four parts should reconstruct Sales exactly, because the sheet derives
+    // PROFIT = Sales - (OPEX + COGS + Shipping + Fees + Total Ad Spend). If they
+    // do not, something upstream has been edited by hand and the chart says so
+    // rather than drawing a bar that silently normalises the gap away.
+    var reconstructed = monthDaily.cod + monthDaily.opex + monthDaily.adSpend + monthDaily.profit;
+    var drift = Math.abs(reconstructed - monthDaily.sales);
+    var driftOk = drift <= Math.max(1, Math.abs(monthDaily.sales) * 0.005);
+
+    splitBody = h("div", null,
+      lossMonth ? h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 12,
+          color: COLORS.red, marginBottom: 12, lineHeight: 1.5 } },
+        "Costs ran " + fmtCurrency(Math.abs(monthDaily.profit)) + " past revenue this month. "
+        + "The split below is of total spend, not of revenue \u2014 a negative share cannot be drawn.") : null,
+      h(ShareBar, { parts: shownParts, total: denom }),
+      h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 11,
+          color: (driftOk || lossMonth) ? COLORS.textFaint : COLORS.orange, marginTop: 12, lineHeight: 1.5 } },
+        lossMonth
+          ? ("COD is COGs (Actual) + Shipping + Fees. Against Sales of " + fmtCurrency(monthDaily.sales)
+             + ", total spend came to " + fmtCurrency(denom) + ".")
+          : driftOk
+          ? ("COD is COGs (Actual) + Shipping + Fees. The four add up to Sales of "
+             + fmtCurrency(monthDaily.sales) + ", because the sheet derives PROFIT as Sales minus every one of them.")
+          : ("These add to " + fmtCurrency(reconstructed) + " against Sales of "
+             + fmtCurrency(monthDaily.sales) + " \u2014 a gap of " + fmtCurrency(drift)
+             + ". The PROFIT column and the cost columns disagree, so one of them has been edited by hand."))
+    );
+  }
+
+  var revenueSplitCard = h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18, marginBottom: 14 } },
+    h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } },
+      "WHERE THE REVENUE WENT"),
+    splitBody
+  );
+
   var monthlyFunnelNote = h("div", { style: { fontFamily: "'Inter', sans-serif", fontSize: 11, color: COLORS.textFaint, marginBottom: 14 } },
     monthFunnel
       ? "Monthly funnel rates are recomputed from the month's summed raw counts across " +
@@ -1159,7 +1485,8 @@ function TraakDashboard() {
       dailyControls, dailyGrid,
       weeklyControls, trafficGrid, adsRow, klaviyoRow,
       h(SectionHeading, null, "Inventory Alerts"), inventorySection,
-      monthlyControls, monthlyGrid, monthlyFunnelGrid, monthlyAdsRow, monthlyFunnelNote
+      monthlyControls, monthlyGrid, monthlyFunnelGrid, monthlyAdsRow, monthlyFunnelNote,
+      dailyLinesCard, revenueSplitCard
     ];
   }
 
