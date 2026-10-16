@@ -1044,6 +1044,58 @@ function TraakDashboard() {
   var monthMeta = aggregateMonthlyAds(data.metaAds, selectedMonth);
   var monthGoogle = aggregateMonthlyAds(data.googleAds, selectedMonth);
   var monthDaily = aggregateMonthlyDaily(data.dailyTracker ? data.dailyTracker.byDate : null, selectedMonth);
+  // Break-even CPA/ROAS from this month's own costs, mirroring
+  // recommendation_data.breakeven_from_totals in traak-recommendation-agent so
+  // the dashboard and the weekly ad report can never disagree about what
+  // "healthy" means. These thresholds used to be hardcoded at {33, 40} and
+  // {2.5, 2}: close to right by luck, but they did not move when costs did,
+  // and they contradicted the agent, which was reading ~A$51 as break-even
+  // because it never subtracted OPEX.
+  var monthBreakeven = null;
+  if (monthDaily && monthDaily.haveCosts && monthDaily.orders) {
+    var contribution = monthDaily.sales - monthDaily.cod - monthDaily.opex;
+    monthBreakeven = {
+      cpa: contribution / monthDaily.orders,
+      // sales / a negative contribution is a positive-looking number that would
+      // paint green, so it is nulled rather than shown.
+      roas: contribution > 0 ? monthDaily.sales / contribution : null
+    };
+  }
+  // Same bands apply_flag uses: healthy at 80% of break-even CPA, 120% of ROAS.
+  var cpaBands = monthBreakeven
+    ? { good: monthBreakeven.cpa * 0.8, warn: monthBreakeven.cpa }
+    : { good: 33, warn: 40 };
+  var roasBands;
+  if (monthBreakeven && monthBreakeven.roas) {
+    roasBands = { good: monthBreakeven.roas * 1.2, warn: monthBreakeven.roas };
+  } else if (monthBreakeven) {
+    // Costs already exceed revenue before ad spend: no ROAS clears that bar, so
+    // the figure is left uncoloured rather than judged against a stale constant.
+    roasBands = null;
+  } else {
+    roasBands = { good: 2.5, warn: 2 };
+  }
+  function roasColor(value) {
+    return roasBands ? statusColor(value, roasBands) : COLORS.textFaint;
+  }
+
+  function breakevenNote(key) {
+    return h("div", { key: key, style: { fontFamily: "'Inter', sans-serif", fontSize: 11,
+        color: COLORS.textFaint, marginBottom: 14, lineHeight: 1.5 } },
+      !monthBreakeven
+        ? "Colouring against fallback thresholds: this month has no cost columns to compute break-even from."
+        : monthBreakeven.cpa <= 0
+        // A negative break-even is not a target you could aim at -- saying so
+        // beats rendering it as "A$-20" and leaving you to work out why.
+        ? ("This month's costs already exceed revenue before any ad spend, so no CPA is "
+           + "affordable and there is no break-even ROAS to colour against. CPA is still "
+           + "shown against the shortfall; ROAS is left uncoloured.")
+        : ("ROAS and CPA are coloured against this month's break-even \u2014 CPA "
+           + fmtCurrency(monthBreakeven.cpa)
+           + (monthBreakeven.roas ? ", ROAS " + monthBreakeven.roas.toFixed(2) + "x" : "")
+           + " \u2014 the point where ads cover COGS, shipping, fees and fixed OPEX."));
+  }
+
   var monthlyRec = data.monthlyRecommendations;
   var weeklyAdRec = data.weeklyAdRecommendations;
 
@@ -1094,8 +1146,8 @@ function TraakDashboard() {
     var body = platformData ? h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 12 } },
       h(MiniStat, { label: "Spend", value: fmtCurrency(platformData.spend) }),
       h(MiniStat, { label: "Revenue", value: fmtCurrency(platformData.convValue) }),
-      h(MiniStat, { label: "ROAS", value: fmtRoas(platformData.roas), color: statusColor(platformData.roas, { good: 2.5, warn: 2 }) }),
-      h(MiniStat, { label: "CPA", value: fmtCurrency(platformData.cpa), color: statusColor(platformData.cpa, { good: 33, warn: 40 }, true) }),
+      h(MiniStat, { label: "ROAS", value: fmtRoas(platformData.roas), color: roasColor(platformData.roas) }),
+      h(MiniStat, { label: "CPA", value: fmtCurrency(platformData.cpa), color: statusColor(platformData.cpa, cpaBands, true) }),
       h(MiniStat, { label: "Conversions", value: fmtNum(platformData.conversions) }),
       h(MiniStat, { label: "Clicks", value: fmtNum(platformData.clicks) }),
       h(MiniStat, { label: "CTR", value: fmtPct(platformData.ctr), color: statusColor(platformData.ctr, { good: 1, warn: 0.5 }) })
@@ -1198,8 +1250,8 @@ function TraakDashboard() {
       var body = monthMeta ? h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 12 } },
         h(MiniStat, { label: "Spend", value: fmtCurrency(monthMeta.spend) }),
         h(MiniStat, { label: "Revenue", value: fmtCurrency(monthMeta.convValue) }),
-        h(MiniStat, { label: "ROAS", value: fmtRoas(monthMeta.roas), color: statusColor(monthMeta.roas, { good: 2.5, warn: 2 }) }),
-        h(MiniStat, { label: "CPA", value: fmtCurrency(monthMeta.cpa), color: statusColor(monthMeta.cpa, { good: 33, warn: 40 }, true) })
+        h(MiniStat, { label: "ROAS", value: fmtRoas(monthMeta.roas), color: roasColor(monthMeta.roas) }),
+        h(MiniStat, { label: "CPA", value: fmtCurrency(monthMeta.cpa), color: statusColor(monthMeta.cpa, cpaBands, true) })
       ) : h(EmptyNote, { text: "No data for this month" });
       return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } },
         h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, "META ADS (month)"), body);
@@ -1208,8 +1260,8 @@ function TraakDashboard() {
       var body = monthGoogle ? h("div", { style: { display: "grid", gridTemplateColumns: narrow ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 12 } },
         h(MiniStat, { label: "Spend", value: fmtCurrency(monthGoogle.spend) }),
         h(MiniStat, { label: "Revenue", value: fmtCurrency(monthGoogle.convValue) }),
-        h(MiniStat, { label: "ROAS", value: fmtRoas(monthGoogle.roas), color: statusColor(monthGoogle.roas, { good: 2.5, warn: 2 }) }),
-        h(MiniStat, { label: "CPA", value: fmtCurrency(monthGoogle.cpa), color: statusColor(monthGoogle.cpa, { good: 33, warn: 40 }, true) })
+        h(MiniStat, { label: "ROAS", value: fmtRoas(monthGoogle.roas), color: roasColor(monthGoogle.roas) }),
+        h(MiniStat, { label: "CPA", value: fmtCurrency(monthGoogle.cpa), color: statusColor(monthGoogle.cpa, cpaBands, true) })
       ) : h(EmptyNote, { text: "No data for this month" });
       return h("div", { style: { background: COLORS.panel, border: "1px solid " + COLORS.panelBorder, borderRadius: 6, padding: narrow ? 14 : 18 } },
         h("div", { style: { fontFamily: "'Oswald', sans-serif", fontSize: 14, marginBottom: 12 } }, "GOOGLE ADS (month)"), body);
@@ -1508,9 +1560,9 @@ function TraakDashboard() {
   } else {
     tabContent = [
       dailyControls, dailyGrid,
-      weeklyControls, trafficGrid, adsRow, klaviyoRow,
+      weeklyControls, trafficGrid, adsRow, breakevenNote("be-weekly"), klaviyoRow,
       inventoryHeading, inventorySection,
-      monthlyControls, monthlyGrid, monthlyFunnelGrid, monthlyAdsRow, monthlyFunnelNote,
+      monthlyControls, monthlyGrid, monthlyFunnelGrid, monthlyAdsRow, breakevenNote("be-monthly"), monthlyFunnelNote,
       dailyLinesCard, revenueSplitCard
     ];
   }
